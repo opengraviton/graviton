@@ -26,6 +26,12 @@ import torch
 
 from graviton.quantization.base import BaseQuantizer, QuantizedTensor
 
+try:
+    import graviton_c
+    HAS_METAL_EXT = True
+except ImportError:
+    HAS_METAL_EXT = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -203,6 +209,32 @@ class TernaryQuantizer(BaseQuantizer):
         Returns:
             Result of input @ weight^T (batch_size, out_features).
         """
+        out_features = qtensor.shape[0]
+        
+        # Try using the accelerated Metal C++ backend if available on macOS Apple Silicon
+        if HAS_METAL_EXT and input_tensor.device.type == "mps" and qtensor.data.device.type == "mps":
+            try:
+                # Route to our custom Objective-C++ / Metal shader bound via pybind11
+                result = graviton_c.ternary_matmul_mps(input_tensor, qtensor.data, out_features)
+                
+                # Apply per-group scaling
+                group_size = qtensor.group_size
+                scale = qtensor.scale.float()
+                in_features = qtensor.shape[1]
+                num_groups_per_row = math.ceil(in_features / group_size)
+                
+                if num_groups_per_row == 1:
+                    result = result * scale[:out_features].unsqueeze(0)
+                else:
+                    scale_per_row = scale.reshape(out_features, -1).mean(dim=1)
+                    result = result * scale_per_row.unsqueeze(0)
+                
+                return result.to(input_tensor.dtype)
+            except Exception as e:
+                logger.debug(f"Metal extension failed, falling back to CPU logic: {e}")
+
+        # ===== PyTorch Fallback (Vectorized Unpacking) =====
+        
         # Unpack ternary values
         ternary = self._unpack_ternary(qtensor.data)
 
