@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 150" width="400" height="300">
+  <rect width="200" height="150" fill="#181818"/>
+  <g transform="translate(100, 75)" stroke="white" stroke-width="3" stroke-linecap="butt">
+    <!-- Top -->
+    <line x1="0" y1="-40" x2="0" y2="-18" />
+    <!-- Bottom -->
+    <line x1="0" y1="40" x2="0" y2="18" />
+    
+    <!-- Left dashes (two separate dashes like in the image) -->
+    <line x1="-55" y1="0" x2="-40" y2="0" />
+    <line x1="-35" y1="0" x2="-20" y2="0" />
+    
+    <!-- Right dashes -->
+    <line x1="55" y1="0" x2="40" y2="0" />
+    <line x1="35" y1="0" x2="20" y2="0" />
+    
+    <!-- Top left slanted -->
+    <line x1="-22" y1="-40" x2="-12" y2="-18" />
+    <!-- Top right slanted -->
+    <line x1="22" y1="-40" x2="12" y2="-18" />
+    
+    <!-- Bottom left slanted -->
+    <line x1="-22" y1="40" x2="-12" y2="18" />
+    <!-- Bottom right slanted -->
+    <line x1="22" y1="40" x2="12" y2="18" />
+  </g>
+  <!-- Center circle -->
+  <circle cx="100" cy="75" r="7.5" fill="white" />
+</svg>
