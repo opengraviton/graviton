@@ -25,7 +25,7 @@ env/
 Thumbs.db
 
 # Models (large files)
-models/
+/models/
 *.bin
 *.pt
 *.pth
