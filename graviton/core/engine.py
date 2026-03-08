@@ -262,26 +262,33 @@ class GravitonEngine:
             while not download_done.is_set():
                 try:
                     if blobs_dir.exists():
-                        downloaded = sum(
-                            f.stat().st_size for f in blobs_dir.iterdir()
-                            if f.is_file()
-                        )
-                        now = _time.monotonic()
-                        dt = now - prev_time
-                        if dt > 0.5 and prev_bytes > 0:
-                            delta = downloaded - prev_bytes
-                            speed_mbps = max(0, (delta / (1024 ** 2)) / dt)
-                        prev_bytes = downloaded
-                        prev_time = now
-                        capped = min(downloaded, total_bytes)
-                        gb_done = capped / (1024 ** 3)
-                        gb_total = total_bytes / (1024 ** 3)
-                        if downloaded >= total_bytes:
+                        all_files = [
+                            f for f in blobs_dir.iterdir() if f.is_file()
+                        ]
+                        incomplete = [
+                            f for f in all_files
+                            if f.name.endswith(".incomplete")
+                        ]
+                        if not incomplete:
                             self._report_progress(
-                                f"Verifying {short_name} "
-                                f"({gb_total:.2f} GB)"
+                                f"Preparing {short_name}..."
                             )
                         else:
+                            downloaded = sum(
+                                f.stat().st_size for f in all_files
+                            )
+                            now = _time.monotonic()
+                            dt = now - prev_time
+                            if dt > 0.5 and prev_bytes > 0:
+                                delta = downloaded - prev_bytes
+                                speed_mbps = max(
+                                    0, (delta / (1024 ** 2)) / dt
+                                )
+                            prev_bytes = downloaded
+                            prev_time = now
+                            capped = min(downloaded, total_bytes)
+                            gb_done = capped / (1024 ** 3)
+                            gb_total = total_bytes / (1024 ** 3)
                             speed_str = ""
                             if speed_mbps > 1:
                                 speed_str = f" @ {speed_mbps:.0f} MB/s"
@@ -293,6 +300,19 @@ class GravitonEngine:
                 except Exception:
                     pass
                 download_done.wait(timeout=1)
+
+        # Fast path: if model is already cached, skip network entirely
+        try:
+            local_dir = snapshot_download(
+                repo_id=path,
+                allow_patterns=allow_patterns,
+                ignore_patterns=["*.msgpack", "*.h5", "*.ot"],
+                local_files_only=True,
+            )
+            self._report_progress(f"Found {short_name} in cache")
+            return Path(local_dir)
+        except Exception:
+            pass
 
         monitor = threading.Thread(target=_monitor_download, daemon=True)
         monitor.start()
