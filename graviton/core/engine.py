@@ -482,16 +482,20 @@ class GravitonEngine:
                 add_generation_prompt=True,
             )
             if isinstance(prompt, str):
+                logger.debug("Using tokenizer chat template for prompt")
                 return prompt
-            if isinstance(prompt, (list, tuple)) and prompt and isinstance(prompt[0], (list, int)):
-                # Some tokenizers return token ids; decode first element
-                ids = prompt[0] if isinstance(prompt[0], list) else prompt
-                return tokenizer.decode(ids, skip_special_tokens=False)
+            if isinstance(prompt, (list, tuple)) and prompt:
+                first = prompt[0]
+                if isinstance(first, (list, int)):
+                    ids = first if isinstance(first, list) else prompt
+                    out = tokenizer.decode(ids, skip_special_tokens=False)
+                    logger.debug("Using tokenizer chat template (decoded from ids)")
+                    return out
             return None
         except Exception as e:
             logger.warning(
-                "apply_chat_template failed (%s), using fallback prompt format",
-                type(e).__name__,
+                "apply_chat_template failed: %s — fallback format will be used",
+                e,
             )
             return None
 

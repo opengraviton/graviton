@@ -278,6 +278,7 @@ def _format_prompt(
     sys_text = system or "You are a friendly and helpful assistant."
 
     if "mistral" in model_id or "mixtral" in model_id:
+        # Match tokenizer: no space before [/INST]
         parts = ["<s>"]
         first_user = True
         for msg in history:
@@ -285,16 +286,16 @@ def _format_prompt(
             content = msg.get("content", "")
             if role == "user":
                 if first_user:
-                    parts.append(f"[INST] {sys_text}\n\n{content} [/INST]")
+                    parts.append(f"[INST] {sys_text}\n\n{content}[/INST]")
                     first_user = False
                 else:
-                    parts.append(f"[INST] {content} [/INST]")
+                    parts.append(f"[INST] {content}[/INST]")
             else:
                 parts.append(f" {content.strip()}</s>")
         if first_user:
-            parts.append(f"[INST] {sys_text}\n\n{message} [/INST]")
+            parts.append(f"[INST] {sys_text}\n\n{message}[/INST]")
         else:
-            parts.append(f"[INST] {message} [/INST]")
+            parts.append(f"[INST] {message}[/INST]")
         return "".join(parts)
 
     parts = []

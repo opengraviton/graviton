@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
 Test Graviton API chat: load a model (if needed), send "hello how are you",
-collect streaming response, and verify it looks like a real answer.
+collect streaming response, and verify a coherent answer.
+
+To get correct responses (especially Mistral/Mixtral):
+  1. Install latest engine:  cd graviton && pip install -e ".[api,huggingface]"
+  2. Start API:  python -m uvicorn graviton.api.server:app --host 127.0.0.1 --port 7862
+  3. Run this script:  python graviton/scripts/test_api_chat.py --port 7862 [--model MODEL]
 
 Usage:
-  # Terminal 1: start the API
-  graviton-api
-
-  # Terminal 2: run test (default port 7860)
-  python graviton/scripts/test_api_chat.py
-
-  # Or with a specific model (default is TinyLlama for speed)
-  python graviton/scripts/test_api_chat.py --model mistralai/Mistral-7B-Instruct-v0.3
+  python graviton/scripts/test_api_chat.py [--port 7862] [--model TinyLlama/...]
 """
 import argparse
 import json
@@ -124,21 +122,37 @@ def main():
     if len(response) < 5:
         print("FAIL: response too short", file=sys.stderr)
         sys.exit(1)
-    # Heuristic: long repeated same word or heavy garbage
-    words = response.split()
-    if len(words) >= 5:
-        from collections import Counter
-        cnt = Counter(w.strip().lower() for w in words)
-        if cnt.most_common(1)[0][1] > max(10, len(words) // 2):
-            print("FAIL: response looks repetitive/gibberish", file=sys.stderr)
-            sys.exit(1)
-    # Very high ratio of non-ASCII / symbols might indicate garbage
-    ascii_letters = sum(1 for c in response if c.isascii() and (c.isalpha() or c.isspace() or c in ".,!?'-"))
-    if len(response) > 20 and ascii_letters / len(response) < 0.5:
-        print("FAIL: response mostly non-ASCII/symbols (possible gibberish)", file=sys.stderr)
+    # Expect a coherent reply: mostly normal words, not code/gibberish
+    ascii_ok = sum(
+        1 for c in response
+        if c.isascii() and (c.isalpha() or c.isspace() or c in ".,!?'-")
+    )
+    ratio = ascii_ok / len(response) if response else 0
+    if len(response) > 30 and ratio < 0.65:
+        print(
+            "FAIL: response is gibberish (too many non-ASCII/symbols).",
+            file=sys.stderr,
+        )
         sys.exit(1)
+    # Greeting reply should contain at least one normal reply word
+    reply_words = {"good", "well", "fine", "great", "thanks", "thank", "hello", "hi", "doing", "help", "you", "how", "am", "are", "i'm", "i am"}
+    words_lower = set(re.split(r"\W+", response.lower()))
+    if len(response) > 20 and not (words_lower & reply_words):
+        print(
+            "FAIL: response does not look like a greeting reply (gibberish).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    from collections import Counter
+    words = [w.strip().lower() for w in response.split() if len(w.strip()) > 1]
+    if len(words) >= 8:
+        cnt = Counter(words)
+        top_count = cnt.most_common(1)[0][1] if cnt else 0
+        if top_count > max(8, len(words) // 3):
+            print("FAIL: response looks repetitive/gibberish.", file=sys.stderr)
+            sys.exit(1)
 
-    print("OK: response looks reasonable.")
+    print("OK: got a coherent response.")
     return 0
 
 
