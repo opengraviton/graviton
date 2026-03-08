@@ -28,6 +28,10 @@ app = FastAPI(
 
 # ── Engine state ────────────────────────────────────────────────────
 
+class _CancelledError(Exception):
+    pass
+
+
 class _EngineState:
     def __init__(self):
         self.engine = None
@@ -37,6 +41,7 @@ class _EngineState:
         self.error: Optional[str] = None
         self.gen_lock = threading.Lock()
         self.config_summary: dict = {}
+        self._cancel_requested: bool = False
 
     @property
     def loaded(self) -> bool:
@@ -49,6 +54,7 @@ class _EngineState:
         self.load_stage = ""
         self.error = None
         self.config_summary = {}
+        self._cancel_requested = False
 
 
 state = _EngineState()
@@ -97,7 +103,13 @@ async def load_model(req: LoadRequest):
 
     state.loading = True
     state.error = None
+    state._cancel_requested = False
     state.load_stage = "Initializing..."
+
+    def _on_progress(msg: str):
+        if state._cancel_requested:
+            raise _CancelledError("Loading cancelled")
+        state.load_stage = msg
 
     def _load():
         try:
@@ -126,7 +138,7 @@ async def load_model(req: LoadRequest):
 
             state.load_stage = "Creating engine..."
             engine = GravitonEngine(config=config)
-            engine.progress_callback = lambda msg: setattr(state, "load_stage", msg)
+            engine.progress_callback = _on_progress
 
             state.load_stage = "Downloading & loading weights..."
             engine.load_model()
@@ -145,9 +157,12 @@ async def load_model(req: LoadRequest):
                 "speculative": req.speculative,
                 "bits": req.bits,
             }
+        except _CancelledError:
+            logger.info("Model loading cancelled")
         except Exception as exc:
-            logger.exception("Model load failed")
-            state.error = str(exc)
+            if not state._cancel_requested:
+                logger.exception("Model load failed")
+                state.error = str(exc)
         finally:
             state.loading = False
             state.load_stage = ""
@@ -169,9 +184,21 @@ async def model_status():
     }
 
 
+@app.post("/api/models/cancel")
+async def cancel_loading():
+    """Cancel an in-progress model load."""
+    if not state.loading:
+        return {"status": "not_loading"}
+    state._cancel_requested = True
+    state.load_stage = "Cancelling..."
+    return {"status": "cancelling"}
+
+
 @app.post("/api/models/unload")
 async def unload_model():
     """Unload the current model and free memory."""
+    if state.loading:
+        state._cancel_requested = True
     state.reset()
     return {"status": "ok"}
 

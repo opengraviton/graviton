@@ -2,15 +2,13 @@
   <img src="assets/logo.svg" alt="Graviton" width="250"/>
 </p>
 <h1 align="center">Graviton</h1>
-<p align="center"><em>Run 70B+ parameter LLMs on hardware you already own.</em></p>
+<p align="center"><em>Run powerful AI models on your own computer.</em></p>
 
 <p align="center">
-  <a href="#installation">Installation</a> &bull;
+  <a href="#one-command-install">Get Started</a> &bull;
   <a href="#quick-start">Quick Start</a> &bull;
-  <a href="#-web-ui">Web UI</a> &bull;
   <a href="#how-it-works">How It Works</a> &bull;
   <a href="#benchmarks">Benchmarks</a> &bull;
-  <a href="#-testing">Testing</a> &bull;
   <a href="#contributing">Contributing</a>
 </p>
 
@@ -18,20 +16,16 @@
 
 ## What is Graviton?
 
-**Graviton** is an open-source AI inference engine that makes large language models accessible on consumer hardware. A 72B-parameter model that normally requires a $10,000+ GPU server? Graviton streams it layer-by-layer, quantizes each layer in-flight, and fits it into **36 GB** on a Mac with 64 GB of unified memory.
+**Graviton** is a free, open-source engine that runs AI models on hardware you already own. A 72B model that normally needs a $10,000 GPU server? Graviton compresses it to **36 GB** and loads it piece by piece on a Mac with 64 GB of RAM.
 
-Modern AI models are getting bigger — GPT-4 class models have hundreds of billions of parameters, requiring server farms with expensive GPUs. Graviton combines seven cutting-edge techniques to make the impossible possible:
-
-| Technique | Impact | Description |
-|---|---|---|
-| **Streaming Layer-by-Layer Loading** | Run 70B+ models | Builds model on meta device, streams each transformer layer from disk, quantizes in-flight, frees originals. Peak memory = 1 FP16 layer + all quantized layers. |
-| **Extreme Quantization** | 4-16x smaller | FP16 &rarr; 4-bit, 2-bit, or 1.58-bit (ternary) weights |
-| **QuantizedLinear** | 62% less memory | Drop-in `nn.Linear` replacement with packed quantized weights |
-| **Mixed-Precision** | Best of both | Critical layers at 8-bit, FFN at 4-bit automatically |
-| **Dynamic Sparsity** | 2-10x faster | Only activate relevant neurons per token |
-| **Layer Streaming** | Unlimited model size | Stream layers from SSD via memory-mapped files |
-| **Speculative Decoding** | 2-3x faster | Layer-skip draft model predicts, full model verifies |
-| **KV-Cache (Fast + Compressed)** | Bounded memory | Pre-allocated buffers (fast) or INT8 compressed (long-context) |
+| What It Does | How |
+|---|---|
+| **Run 70B+ models on a laptop** | Streams each layer from disk, compresses in-flight, frees the original — never needs the full model in memory |
+| **Shrink models 4–10x** | Compresses 16-bit weights to 4-bit, 2-bit, or 1.58-bit — a 144 GB model becomes 36 GB |
+| **Smart compression** | Critical layers get higher precision, less important layers get more aggressive compression |
+| **Fast generation** | Predicts multiple tokens at once, skips unnecessary computation — 2–3x faster output |
+| **Stream from SSD** | Memory-maps weights from your SSD — even a 1 TB model can run with 16 GB RAM |
+| **Works everywhere** | Apple Silicon (MPS), NVIDIA GPU (CUDA), or CPU |
 
 ### The Math
 
@@ -67,11 +61,12 @@ The headless API server starts on `0.0.0.0:7860`. An agent on a low-budget machi
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/health` | GET | Liveness check for agents and orchestrators |
+| `/health` | GET | Check if the server is running |
 | `/api/models/load` | POST | Load a model: `{"model_id": "Qwen/Qwen2.5-72B-Instruct", "bits": 4}` |
-| `/api/models/status` | GET | Check loading progress (layer-by-layer status for large models) |
-| `/api/chat` | POST | Chat: `{"message": "Hello", "temperature": 0.7}` — returns SSE token stream |
-| `/api/models/unload` | POST | Unload the current model and free memory |
+| `/api/models/status` | GET | Check loading progress |
+| `/api/chat` | POST | Send a message: `{"message": "Hello", "temperature": 0.7}` — streaming response |
+| `/api/models/cancel` | POST | Cancel an in-progress load |
+| `/api/models/unload` | POST | Unload the model and free memory |
 
 ### From Source (Development)
 
@@ -325,34 +320,11 @@ graviton run TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
 
 ## Testing
 
-Graviton has a comprehensive test suite covering every component — **88 tests across 10 test modules**, all passing:
-
 ```bash
 pytest tests/ -v
-# ============================== 88 passed in 2.46s ==============================
 ```
 
-| Test Module | Tests | Coverage Area |
-|---|---|---|
-| `test_attention.py` | 6 | RoPE, single/multi-token decode, causal mask correctness, future-leakage prevention |
-| `test_config.py` | 11 | Config propagation, presets (Mac Mini/extreme/quality), QuantMode, memory estimation |
-| `test_decoding.py` | 9 | Sampler (greedy, top-k, top-p, repetition penalty), SpeculativeDecoder acceptance/rejection |
-| `test_engine.py` | 3 | Hardware detection, engine initialization, benchmark |
-| `test_memory.py` | 2 | Memory budget enforcement, LRU cache eviction |
-| `test_mixed_precision.py` | 11 | Layer-bit selection, overrides, sensitivity scores, quantize/dequantize roundtrip |
-| `test_model.py` | 11 | GravitonCausalLM forward pass, KV cache, layer_skip, quantize_weights (linear/ternary/mixed) |
-| `test_quantization.py` | 3 | INT8 quantize/dequantize, ternary packing, ternary matmul correctness |
-| `test_quantized_linear.py` | 19 | QuantizedLinear INT4/INT8/ternary roundtrip, bias handling, device transfer, KV cache fast-path + compressed mode |
-| `test_sparsity.py` | 2 | TopK activation sparsity, identity pass-through |
-| `test_transformer.py` | 5 | TransformerBlock forward pass, KV cache integration, residual connections |
-
-Key areas validated:
-
-- **Causal mask correctness** — multi-token decode (speculative verification) produces correct causal attention when Q and KV lengths differ
-- **Device-aware quantization** — all pack/unpack operations stay on the correct device (CPU/MPS/CUDA) without silent transfers
-- **QuantizedLinear fidelity** — INT8 roundtrip error < 0.05, INT4 < 0.5; cached weights persist across forward calls
-- **Speculative decoding** — acceptance/rejection sampling, KV cache snapshot & rollback, bonus token generation
-- **Mixed-precision routing** — critical layers get higher precision, FFN layers get aggressive compression
+Full test suite covering quantization, attention, speculative decoding, KV cache, streaming loading, and end-to-end inference.
 
 ## Contributing
 
@@ -361,7 +333,7 @@ We welcome contributions! Here's how to get started:
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feature/amazing-feature`
 3. Make your changes and add tests
-4. Run the full test suite: `pytest tests/ -v` (all 88 tests must pass)
+4. Run the test suite: `pytest tests/ -v`
 5. Submit a pull request
 
 ### Development Setup
@@ -370,7 +342,7 @@ We welcome contributions! Here's how to get started:
 git clone https://github.com/opengraviton/graviton.git
 cd graviton
 pip install -e ".[all]"
-pytest tests/ -v   # 88 tests, ~2 seconds
+pytest tests/ -v
 ```
 
 ## License

@@ -163,6 +163,7 @@ class GravitonEngine:
         logger.info(f"Loading model from: {path}")
         start_time = time.time()
 
+        self._report_progress("Downloading model files...")
         model_dir = self._resolve_model_dir(path)
         self._build_inference_model(model_dir)
 
@@ -262,12 +263,13 @@ class GravitonEngine:
             )
             self._model_config = self._model.model_config
         else:
-            logger.info("Building inference model...")
+            self._report_progress("Building inference model...")
             self._model = GravitonCausalLM.from_pretrained_dir(
                 model_dir,
                 engine_config=self.config,
                 dtype=self.dtype,
             )
+            self._report_progress("Moving model to device...")
             self._model.to(self.device)
             self._model.eval()
             self._model_config = self._model.model_config
@@ -276,14 +278,14 @@ class GravitonEngine:
                 self.quantizer is not None
                 and self.config.quantization.mode != QuantMode.NONE
             ):
-                logger.info(f"Applying {self.config.quantization.mode.value} quantization...")
+                self._report_progress(f"Applying {self.config.quantization.mode.value} quantization...")
                 self._model.quantize_weights(self.quantizer)
 
             param_count = sum(p.numel() for p in self._model.parameters())
             buf_bytes = sum(b.numel() * b.element_size() for b in self._model.buffers())
             param_bytes = sum(p.numel() * p.element_size() for p in self._model.parameters())
             total_gb = (param_bytes + buf_bytes) / (1024 ** 3)
-            logger.info(f"Model ready: {param_count / 1e9:.2f}B params, {total_gb:.2f} GB on {self.device}")
+            self._report_progress(f"Model ready: {param_count / 1e9:.2f}B params, {total_gb:.2f} GB on {self.device}")
 
         self._load_tokenizer(model_dir)
 
