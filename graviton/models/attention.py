@@ -167,30 +167,61 @@ class EfficientAttention(nn.Module):
             key_states = torch.repeat_interleave(key_states, dim=1, repeats=self.num_key_value_groups)
             value_states = torch.repeat_interleave(value_states, dim=1, repeats=self.num_key_value_groups)
             
+        # Build the correct causal mask.
+        # is_causal=True only works when Q and KV have the same length (prefill).
+        # For multi-token decode (speculative verification) where KV is longer
+        # than Q, we construct an explicit mask.
+        q_len = query_states.shape[2]
+        kv_len = key_states.shape[2]
+
+        if attention_mask is not None:
+            causal_mask = attention_mask
+            use_is_causal = False
+        elif q_len > 1 and q_len != kv_len:
+            # Speculative verification: Q shorter than KV
+            device = query_states.device
+            row_pos = torch.arange(kv_len - q_len, kv_len, device=device)
+            col_pos = torch.arange(kv_len, device=device)
+            blocked = col_pos.unsqueeze(0) > row_pos.unsqueeze(1)
+            causal_mask = torch.zeros(
+                1, 1, q_len, kv_len, device=device, dtype=query_states.dtype
+            )
+            causal_mask.masked_fill_(blocked.unsqueeze(0).unsqueeze(0), float("-inf"))
+            use_is_causal = False
+        elif q_len > 1:
+            causal_mask = None
+            use_is_causal = True
+        else:
+            causal_mask = None
+            use_is_causal = False
+
         # Compute Attention
         if self._use_flash and not hidden_states.requires_grad:
-            # Fast path: PyTorch 2.0+ Flash Attention
             attn_output = F.scaled_dot_product_attention(
                 query_states,
                 key_states,
                 value_states,
-                attn_mask=attention_mask,
+                attn_mask=causal_mask,
                 dropout_p=self.dropout if self.training else 0.0,
-                is_causal=True if attention_mask is None and seq_length > 1 else False,
+                is_causal=use_is_causal,
             )
         else:
-            # Slow path: Standard Attention
             attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-            
-            if attention_mask is not None:
-                attn_weights = attn_weights + attention_mask
-                
-            # Upcast softmax to full precision for stability
+
+            if causal_mask is not None:
+                attn_weights = attn_weights + causal_mask
+            elif use_is_causal:
+                mask = torch.triu(
+                    torch.ones(q_len, kv_len, device=query_states.device),
+                    diagonal=1,
+                ).bool()
+                attn_weights.masked_fill_(mask.unsqueeze(0).unsqueeze(0), float("-inf"))
+
             attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-            
+
             if self.dropout > 0.0 and self.training:
                 attn_weights = F.dropout(attn_weights, p=self.dropout)
-                
+
             attn_output = torch.matmul(attn_weights, value_states)
             
         # Reshape output: [batch, num_heads, seq_len, head_dim] -> [batch, seq_len, hidden_size]

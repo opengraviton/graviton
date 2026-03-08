@@ -85,6 +85,7 @@ def cmd_run(args):
         memory=GravitonConfig().memory,
         decoding=GravitonConfig().decoding,
         verbose=args.verbose,
+        use_speculative=args.speculative,
     )
     
     if args.memory > 0:
@@ -92,6 +93,12 @@ def cmd_run(args):
         
     config.decoding.temperature = args.temperature
     config.decoding.max_tokens = args.max_tokens
+    if args.speculative:
+        config.decoding.num_speculative_tokens = args.spec_tokens
+    if args.no_quantize:
+        config.quantization.mode = QuantMode.NONE
+    if args.no_mixed:
+        config.quantization.use_mixed_precision = False
     
     print("Initializing Graviton Engine...")
     engine = GravitonEngine(config=config)
@@ -119,7 +126,17 @@ def cmd_run(args):
 
     elapsed = time.time() - start_time
     print(f"\n{'-' * 50}")
-    print(f"Generated {chunk_count} tokens in {elapsed:.2f}s ({chunk_count / max(elapsed, 0.001):.1f} tok/s)")
+    tok_s = chunk_count / max(elapsed, 0.001)
+    print(f"Generated {chunk_count} tokens in {elapsed:.2f}s ({tok_s:.1f} tok/s)")
+    if args.speculative:
+        print(f"Mode: speculative decoding (gamma={args.spec_tokens}, layer_skip=3)")
+    if args.no_quantize:
+        quant_label = "FP16 (no quantization)"
+    elif args.no_mixed:
+        quant_label = f"INT{int(args.bits)} uniform"
+    else:
+        quant_label = f"Mixed-precision (critical=8bit, other={int(args.bits)}bit)"
+    print(f"Quantization: {quant_label}")
 
 
 def cmd_quantize(args):
@@ -221,6 +238,22 @@ def main():
     )
     parser_run.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
+    )
+    parser_run.add_argument(
+        "--speculative", action="store_true",
+        help="Enable speculative decoding (layer-skip draft model)"
+    )
+    parser_run.add_argument(
+        "--spec-tokens", type=int, default=4,
+        help="Number of speculative draft tokens per step"
+    )
+    parser_run.add_argument(
+        "--no-quantize", action="store_true",
+        help="Disable weight quantization (run in FP16)"
+    )
+    parser_run.add_argument(
+        "--no-mixed", action="store_true",
+        help="Disable mixed-precision (use uniform bit-width for all layers)"
     )
     
     # 3. 'quantize' command

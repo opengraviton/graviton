@@ -198,6 +198,7 @@ class GravitonEngine:
     def _build_inference_model(self, model_dir: Path):
         """Build the full inference model from a local directory."""
         from graviton.models.graviton_model import GravitonCausalLM
+        from graviton.core.config import QuantMode
 
         logger.info("Building inference model...")
         self._model = GravitonCausalLM.from_pretrained_dir(
@@ -209,9 +210,19 @@ class GravitonEngine:
         self._model.eval()
         self._model_config = self._model.model_config
 
+        # Apply weight quantization if configured
+        if (
+            self.quantizer is not None
+            and self.config.quantization.mode != QuantMode.NONE
+        ):
+            logger.info(f"Applying {self.config.quantization.mode.value} quantization to model weights...")
+            self._model.quantize_weights(self.quantizer)
+
         param_count = sum(p.numel() for p in self._model.parameters())
-        mem_gb = sum(p.numel() * p.element_size() for p in self._model.parameters()) / (1024**3)
-        logger.info(f"Model ready: {param_count / 1e9:.2f}B params, {mem_gb:.2f} GB on {self.device}")
+        buf_bytes = sum(b.numel() * b.element_size() for b in self._model.buffers())
+        param_bytes = sum(p.numel() * p.element_size() for p in self._model.parameters())
+        total_gb = (param_bytes + buf_bytes) / (1024**3)
+        logger.info(f"Model ready: {param_count / 1e9:.2f}B params, {total_gb:.2f} GB on {self.device}")
 
         self._load_tokenizer(model_dir)
 
@@ -293,41 +304,59 @@ class GravitonEngine:
         """
         Generate text token-by-token with streaming output.
 
+        Automatically switches to speculative decoding when enabled
+        in the configuration.
+        """
+        if self.config.decoding.use_speculative:
+            yield from self._generate_stream_speculative(
+                prompt, max_tokens, temperature, top_p, top_k,
+            )
+        else:
+            yield from self._generate_stream_standard(
+                prompt, max_tokens, temperature, top_p, top_k,
+            )
+
+    def _generate_stream_standard(
+        self,
+        prompt: str,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+    ) -> Generator[str, None, None]:
+        """
+        Standard autoregressive generation with KV cache.
+
         Pipeline:
             1. Tokenize the prompt
             2. Prefill: forward pass on full prompt, populate KV cache
             3. Decode loop: generate one token per step using cached KV
             4. Detokenize and yield text chunks
         """
-        logger.info("Starting token generation...")
+        logger.info("Starting standard token generation...")
 
         device = self.device
         model = self._model
         tokenizer = self._tokenizer
 
-        # Configure sampler for this generation call
         self.sampler.temperature = temperature
         self.sampler.top_p = top_p
         self.sampler.top_k = top_k
 
-        # Tokenize prompt
         inputs = tokenizer(prompt, return_tensors="pt")
         input_ids = inputs["input_ids"].to(device)
         prompt_len = input_ids.shape[1]
 
-        # Fresh KV cache for this generation
         model.init_kv_cache()
 
         generated_ids: list[int] = []
         prev_text = ""
 
         with torch.no_grad():
-            # --- Prefill: process all prompt tokens at once ---
             logits = model(input_ids, start_pos=0)
             next_logits = logits[:, -1, :].float()
 
-            # Sample first new token
-            next_token = self.sampler(next_logits)           # [1, 1]
+            next_token = self.sampler(next_logits)
             next_token_id = next_token.item()
 
             if next_token_id == tokenizer.eos_token_id:
@@ -341,14 +370,12 @@ class GravitonEngine:
             if new_text:
                 yield new_text
 
-            # --- Autoregressive decode loop ---
             current_pos = prompt_len
             for _step in range(max_tokens - 1):
                 token_input = torch.tensor([[next_token_id]], device=device)
                 logits = model(token_input, start_pos=current_pos)
                 next_logits = logits[:, -1, :].float()
 
-                # Build previous-token tensor for repetition penalty
                 all_ids = input_ids[0].tolist() + generated_ids
                 prev_tokens = torch.tensor([all_ids], device=device)
 
@@ -367,6 +394,217 @@ class GravitonEngine:
 
                 current_pos += 1
 
+        model.clear_kv_cache()
+
+    # ------------------------------------------------------------------
+    # Speculative decoding generation
+    # ------------------------------------------------------------------
+
+    def _generate_stream_speculative(
+        self,
+        prompt: str,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+    ) -> Generator[str, None, None]:
+        """
+        Speculative decoding with layer-skip draft model.
+
+        Algorithm per step:
+            1. Draft: run gamma tokens through the model with layer_skip=3
+               (3x fewer layers -> ~3x faster draft).
+            2. Rollback the KV cache to pre-draft state.
+            3. Target: verify all gamma draft tokens in one forward pass
+               through the full model.
+            4. Accept/reject using standard speculative rejection sampling.
+            5. Yield accepted text and continue.
+        """
+        gamma = self.config.decoding.num_speculative_tokens
+        draft_layer_skip = 2
+        logger.info(
+            f"Starting speculative generation (gamma={gamma}, "
+            f"draft_layer_skip={draft_layer_skip})..."
+        )
+
+        device = self.device
+        model = self._model
+        tokenizer = self._tokenizer
+
+        self.sampler.temperature = temperature
+        self.sampler.top_p = top_p
+        self.sampler.top_k = top_k
+
+        inputs = tokenizer(prompt, return_tensors="pt")
+        input_ids = inputs["input_ids"].to(device)
+        prompt_len = input_ids.shape[1]
+
+        model.init_kv_cache()
+
+        generated_ids: list[int] = []
+        prev_text = ""
+        tokens_generated = 0
+
+        # Stats
+        accepted_total = 0
+        speculated_total = 0
+
+        with torch.no_grad():
+            # --- Prefill ---
+            logits = model(input_ids, start_pos=0)
+            next_logits = logits[:, -1, :].float()
+
+            next_token = self.sampler(next_logits)
+            next_token_id = next_token.item()
+
+            if next_token_id == tokenizer.eos_token_id:
+                model.clear_kv_cache()
+                return
+
+            generated_ids.append(next_token_id)
+            tokens_generated += 1
+            current_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+            new_text = current_text[len(prev_text):]
+            prev_text = current_text
+            if new_text:
+                yield new_text
+
+            current_pos = prompt_len
+
+            # --- Speculative decode loop ---
+            while tokens_generated < max_tokens:
+                # 1) Save KV cache positions before drafting
+                cache_snapshot = model.kv_cache.get_positions()
+
+                # 2) Draft phase: generate gamma tokens with layer_skip
+                draft_token_ids = []
+                draft_probs = []
+                draft_id = next_token_id
+
+                for _ in range(gamma):
+                    token_input = torch.tensor([[draft_id]], device=device)
+                    draft_logits = model(
+                        token_input,
+                        start_pos=current_pos + len(draft_token_ids),
+                        layer_skip=draft_layer_skip,
+                    )
+                    draft_logits_last = draft_logits[:, -1, :].float()
+                    draft_p = torch.softmax(draft_logits_last, dim=-1)
+                    draft_id = torch.argmax(draft_p, dim=-1).item()
+                    draft_token_ids.append(draft_id)
+                    draft_probs.append(draft_p)
+
+                # 3) Rollback KV cache to pre-draft state
+                model.kv_cache.truncate_to(cache_snapshot)
+
+                # 4) Target verification: run all draft tokens in one forward pass
+                verify_input = torch.tensor(
+                    [[next_token_id] + draft_token_ids], device=device
+                )
+                target_logits = model(
+                    verify_input,
+                    start_pos=current_pos,
+                    layer_skip=1,
+                )
+
+                # 5) Accept/reject via rejection sampling
+                #    n_verified = purely accepted tokens (KV cache valid)
+                #    corrected_id = resampled token at first rejection point
+                n_verified = 0
+                corrected_id = None
+                for t in range(gamma):
+                    target_p = torch.softmax(
+                        target_logits[:, t, :].float(), dim=-1
+                    )
+                    proposed_id = draft_token_ids[t]
+                    p_target = target_p[0, proposed_id].item()
+                    p_draft = draft_probs[t][0, proposed_id].item()
+
+                    r = torch.rand(1).item()
+                    if p_draft > 0 and r < (p_target / max(p_draft, 1e-10)):
+                        n_verified += 1
+                    else:
+                        corrected = self.sampler(target_logits[:, t, :].float())
+                        corrected_id = corrected.item()
+                        break
+
+                accepted_total += n_verified
+                speculated_total += gamma
+
+                # 6) KV cache management
+                # The target verification populated positions for all gamma+1 tokens.
+                # KV entries for positions current_pos .. current_pos+n_verified are
+                # valid (verify_input[0] + n_verified accepted drafts).
+                # Truncate everything beyond that.
+                keep_len = {
+                    layer: pos + 1 + n_verified
+                    for layer, pos in cache_snapshot.items()
+                }
+                model.kv_cache.truncate_to(keep_len)
+
+                # Bonus token: if all gamma tokens accepted
+                bonus_id = None
+                if n_verified == gamma:
+                    bonus_logits = target_logits[:, -1, :].float()
+                    bonus_token = self.sampler(bonus_logits)
+                    bonus_id = bonus_token.item()
+
+                # Yield verified tokens
+                output_ids = draft_token_ids[:n_verified]
+                if corrected_id is not None:
+                    output_ids.append(corrected_id)
+
+                hit_eos = False
+                for tid in output_ids:
+                    if tid == tokenizer.eos_token_id:
+                        hit_eos = True
+                        break
+                    generated_ids.append(tid)
+                    tokens_generated += 1
+                    current_text = tokenizer.decode(
+                        generated_ids, skip_special_tokens=True
+                    )
+                    new_text = current_text[len(prev_text):]
+                    prev_text = current_text
+                    if new_text:
+                        yield new_text
+
+                if hit_eos:
+                    break
+
+                # Yield bonus token
+                if bonus_id is not None and not hit_eos:
+                    if bonus_id == tokenizer.eos_token_id:
+                        break
+                    generated_ids.append(bonus_id)
+                    tokens_generated += 1
+                    current_text = tokenizer.decode(
+                        generated_ids, skip_special_tokens=True
+                    )
+                    new_text = current_text[len(prev_text):]
+                    prev_text = current_text
+                    if new_text:
+                        yield new_text
+
+                # Advance position: the target verification added KV entries for
+                # next_token_id (1) + n_verified accepted draft tokens.
+                # The corrected/bonus token does NOT have a KV entry yet;
+                # it becomes next_token_id and gets its KV computed as
+                # verify_input[0] in the next speculative step.
+                current_pos += 1 + n_verified
+                if bonus_id is not None:
+                    next_token_id = bonus_id
+                elif corrected_id is not None:
+                    next_token_id = corrected_id
+                elif output_ids:
+                    next_token_id = output_ids[-1]
+
+        acceptance_rate = accepted_total / max(speculated_total, 1)
+        logger.info(
+            f"Speculative decoding done: {tokens_generated} tokens, "
+            f"acceptance rate {acceptance_rate:.1%} "
+            f"({accepted_total}/{speculated_total})"
+        )
         model.clear_kv_cache()
 
     # ------------------------------------------------------------------

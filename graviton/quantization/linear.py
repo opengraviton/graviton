@@ -231,7 +231,8 @@ class LinearQuantizer(BaseQuantizer):
 
         # Pack
         packed = torch.zeros(
-            unsigned.numel() // elements_per_byte, dtype=torch.uint8
+            unsigned.numel() // elements_per_byte, dtype=torch.uint8,
+            device=data.device,
         )
 
         for i in range(elements_per_byte):
@@ -256,9 +257,9 @@ class LinearQuantizer(BaseQuantizer):
         elements_per_byte = 8 // bits
         mask = (1 << bits) - 1
 
-        # Unpack
+        device = packed.device
         unpacked = torch.zeros(
-            packed.numel() * elements_per_byte, dtype=torch.float32
+            packed.numel() * elements_per_byte, dtype=torch.float32, device=device
         )
 
         for i in range(elements_per_byte):

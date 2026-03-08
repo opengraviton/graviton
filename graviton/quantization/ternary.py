@@ -301,7 +301,7 @@ class TernaryQuantizer(BaseQuantizer):
             encoded = torch.nn.functional.pad(encoded, (0, pad), value=1)  # pad with 0→1
 
         # Pack 4 trits per byte
-        packed = torch.zeros(encoded.numel() // 4, dtype=torch.uint8)
+        packed = torch.zeros(encoded.numel() // 4, dtype=torch.uint8, device=data.device)
         packed = (
             encoded[0::4]
             + encoded[1::4] * 3
@@ -321,7 +321,8 @@ class TernaryQuantizer(BaseQuantizer):
         Returns:
             Tensor of floats with values -1, 0, or +1.
         """
-        result = torch.zeros(packed.numel() * 4, dtype=torch.float32)
+        device = packed.device
+        result = torch.zeros(packed.numel() * 4, dtype=torch.float32, device=device)
 
         values = packed.int()
 

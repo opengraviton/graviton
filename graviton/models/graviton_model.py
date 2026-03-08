@@ -106,19 +106,25 @@ class GravitonCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         start_pos: int = 0,
+        layer_skip: int = 1,
+        kv_cache_override: Optional[KVCacheCompressor] = None,
     ) -> torch.Tensor:
         """
         Forward pass through the full model.
 
         Args:
             input_ids: Token IDs [batch, seq_len].
-            start_pos:  Position offset for RoPE (0 for prefill, increments during decode).
+            start_pos: Position offset for RoPE (0 for prefill, increments during decode).
+            layer_skip: Process every Nth layer (1 = all layers, 2 = half, etc.).
+                        Used for speculative decoding draft mode.
+            kv_cache_override: Explicit KV cache to use instead of ``self.kv_cache``.
 
         Returns:
             Logits tensor [batch, seq_len, vocab_size].
         """
         _batch, seq_len = input_ids.shape
         device = input_ids.device
+        cache = kv_cache_override if kv_cache_override is not None else self.kv_cache
 
         h = self.embed_tokens(input_ids)
 
@@ -127,12 +133,63 @@ class GravitonCausalLM(nn.Module):
         ).unsqueeze(0)
         position_embeddings = self.rope(position_ids)
 
-        for layer in self.layers:
-            h = layer(h, kv_cache=self.kv_cache, position_embeddings=position_embeddings)
+        for i, layer in enumerate(self.layers):
+            if layer_skip > 1 and i % layer_skip != 0:
+                continue
+            h = layer(h, kv_cache=cache, position_embeddings=position_embeddings)
 
         h = self.norm(h)
         logits = self.lm_head(h)
         return logits
+
+    # ------------------------------------------------------------------
+    # Post-load quantization
+    # ------------------------------------------------------------------
+
+    def quantize_weights(self, quantizer):
+        """
+        Replace all eligible nn.Linear layers with QuantizedLinear.
+
+        Embedding, layer norms, and lm_head are kept at full precision
+        to preserve model quality.  For ``MixedPrecisionQuantizer`` the
+        per-layer bit width is determined by the layer name.
+        """
+        from graviton.quantization.quantized_linear import QuantizedLinear
+        from graviton.quantization.mixed_precision import MixedPrecisionQuantizer
+
+        skip_patterns = ["embed", "norm", "lm_head"]
+        is_mixed = isinstance(quantizer, MixedPrecisionQuantizer)
+        count = 0
+        saved_bytes = 0
+
+        for name, module in list(self.named_modules()):
+            if not isinstance(module, nn.Linear):
+                continue
+            if any(p in name for p in skip_patterns):
+                continue
+
+            if is_mixed:
+                bits = quantizer.get_layer_bits(name)
+                layer_quantizer = quantizer._get_quantizer(bits)
+            else:
+                layer_quantizer = quantizer
+
+            orig_bytes = module.weight.numel() * module.weight.element_size()
+            qlinear = QuantizedLinear.from_linear(module, layer_quantizer)
+            packed_bytes = qlinear.packed_size_bytes
+            saved_bytes += orig_bytes - packed_bytes
+
+            parts = name.split(".")
+            parent = self
+            for p in parts[:-1]:
+                parent = getattr(parent, p)
+            setattr(parent, parts[-1], qlinear)
+            count += 1
+
+        logger.info(
+            f"Quantized {count} linear layers, "
+            f"saved {saved_bytes / (1024**2):.0f} MB in packed storage"
+        )
 
     # ------------------------------------------------------------------
     # Weight loading

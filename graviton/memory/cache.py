@@ -216,6 +216,37 @@ class KVCacheCompressor:
             self._values.clear()
             self._lengths.clear()
 
+    def get_positions(self) -> dict:
+        """Return a snapshot of current sequence lengths per layer."""
+        return dict(self._lengths)
+
+    def truncate_to(self, positions: dict):
+        """
+        Truncate each layer's cache to the given sequence length.
+
+        Used by speculative decoding to roll back after a draft phase
+        or to discard rejected tokens.
+        """
+        for layer_idx, target_len in positions.items():
+            if layer_idx not in self._keys:
+                continue
+            current_len = self._lengths.get(layer_idx, 0)
+            if target_len >= current_len:
+                continue
+
+            q_key, k_scale = self._keys[layer_idx]
+            q_value, v_scale = self._values[layer_idx]
+
+            self._keys[layer_idx] = (
+                q_key[..., :target_len, :],
+                k_scale[..., :target_len, :],
+            )
+            self._values[layer_idx] = (
+                q_value[..., :target_len, :],
+                v_scale[..., :target_len, :],
+            )
+            self._lengths[layer_idx] = target_len
+
     def memory_usage_bytes(self) -> int:
         """Total memory used by the cache in bytes."""
         total = 0
