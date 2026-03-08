@@ -41,10 +41,13 @@ A 500B parameter model at FP16 requires ~1TB of memory. With Graviton:
 
 ```bash
 # Clone the repository
-git clone https://github.com/fatihturker/graviton.git
+git clone https://github.com/opengraviton/graviton.git
 cd graviton
 
-# Install in development mode
+# Install with HuggingFace support (recommended)
+pip install -e ".[all]"
+
+# Or minimal install (no HuggingFace model downloading)
 pip install -e ".[dev]"
 ```
 
@@ -55,6 +58,23 @@ pip install -e ".[dev]"
 - NumPy
 - Apple Silicon Mac recommended (but works on any platform)
 
+### HuggingFace Setup (for downloading models)
+
+Many models on HuggingFace require authentication. To use them:
+
+1. Create a free account at [huggingface.co](https://huggingface.co)
+2. Generate an access token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+3. Authenticate via CLI:
+   ```bash
+   huggingface-cli login
+   ```
+   Or set the environment variable:
+   ```bash
+   export HF_TOKEN="hf_your_token_here"
+   ```
+
+> **Tip:** For gated models (like LLaMA), you must also accept the model's license on its HuggingFace page before downloading.
+
 ## 🏁 Quick Start
 
 ### Python API
@@ -64,15 +84,15 @@ from graviton import GravitonEngine, GravitonConfig
 
 # Configure for your hardware
 config = GravitonConfig(
+    model_path="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     quant_bits=4,           # 4-bit quantization
     sparsity_ratio=0.5,     # Use 50% of neurons
     max_memory_gb=16,       # 16GB memory budget
-    use_mmap=True,          # Memory-mapped loading
-    use_speculative=True,   # Speculative decoding
 )
 
-# Load and optimize a model
-engine = GravitonEngine("meta-llama/Llama-2-70b", config=config)
+# Initialize and load model
+engine = GravitonEngine(config=config)
+engine.load_model()
 
 # Generate text
 response = engine.generate(
@@ -83,20 +103,25 @@ response = engine.generate(
 print(response)
 ```
 
+> **Note:** The example above uses [TinyLlama-1.1B](https://huggingface.co/TinyLlama/TinyLlama-1.1B-Chat-v1.0), an open (non-gated) model that doesn't require special access. For gated models like LLaMA-2/3, see [HuggingFace Setup](#huggingface-setup-for-downloading-models) above.
+
 ### CLI
 
 ```bash
 # Check your hardware capabilities
 graviton info
 
-# Quantize a model
-graviton quantize meta-llama/Llama-2-70b --bits 4 --output ./models/llama-70b-4bit
+# Run inference with a small open model
+graviton run TinyLlama/TinyLlama-1.1B-Chat-v1.0 --prompt "Hello, world!"
 
-# Run inference
-graviton run ./models/llama-70b-4bit --prompt "Hello, world!"
+# Quantize a model
+graviton quantize TinyLlama/TinyLlama-1.1B-Chat-v1.0 --bits 4 --output ./models/tinyllama-4bit
+
+# Run inference on the quantized model
+graviton run ./models/tinyllama-4bit --prompt "Hello, world!"
 
 # Benchmark performance
-graviton benchmark ./models/llama-70b-4bit
+graviton benchmark
 ```
 
 ## 🔬 How It Works
@@ -208,9 +233,9 @@ We welcome contributions! Here's how to get started:
 ### Development Setup
 
 ```bash
-git clone https://github.com/fatihturker/graviton.git
+git clone https://github.com/opengraviton/graviton.git
 cd graviton
-pip install -e ".[dev]"
+pip install -e ".[all]"
 pytest tests/ -v
 ```
 

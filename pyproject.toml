@@ -60,9 +60,9 @@ all = [
 graviton = "graviton.cli.main:main"
 
 [project.urls]
-Homepage = "https://github.com/fatihturker/graviton"
-Repository = "https://github.com/fatihturker/graviton"
-Issues = "https://github.com/fatihturker/graviton/issues"
+Homepage = "https://opengraviton.github.io"
+Repository = "https://github.com/opengraviton/graviton"
+Issues = "https://github.com/opengraviton/graviton/issues"
 
 [tool.setuptools.packages.find]
 include = ["graviton*"]
