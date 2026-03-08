@@ -7,6 +7,7 @@
 <p align="center">
   <a href="#installation">Installation</a> •
   <a href="#quick-start">Quick Start</a> •
+  <a href="#-web-ui">Web UI</a> •
   <a href="#how-it-works">How It Works</a> •
   <a href="#benchmarks">Benchmarks</a> •
   <a href="#-testing">Testing</a> •
@@ -149,6 +150,22 @@ computing cannot.
 Generated 80 tokens in 4.28s (18.7 tok/s)
 Quantization: INT8 uniform
 ```
+
+## 🖥️ Web UI
+
+Don't want to use the CLI? **[Graviton UI](https://github.com/opengraviton/graviton-ui)** is a beautiful dark-themed chat interface that runs in your browser:
+
+```bash
+pip install graviton-ui
+graviton-ui          # opens http://localhost:7860
+```
+
+- Enter a HuggingFace token and model ID
+- Pick quantization mode (FP16 / INT8 / INT4 / Mixed / Ternary)
+- Chat with real-time streaming + live tok/s counter
+- Toggle speculative decoding, temperature, max tokens from the sidebar
+
+[![Graviton UI](https://img.shields.io/badge/Graviton_UI-Chat_Interface-8b5cf6?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIyIj48Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSIxMCIvPjxwYXRoIGQ9Ik0xMiAyYTE1LjMgMTUuMyAwIDAgMSA0IDEwIDE1LjMgMTUuMyAwIDAgMS00IDEwIDE1LjMgMTUuMyAwIDAgMS00LTEwIDE1LjMgMTUuMyAwIDAgMSA0LTEweiIvPjwvc3ZnPg==)](https://github.com/opengraviton/graviton-ui)
 
 ## 🔬 How It Works
 
