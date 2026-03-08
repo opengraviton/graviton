@@ -183,21 +183,126 @@ class GravitonEngine:
             return local
 
         try:
-            from huggingface_hub import snapshot_download
-
-            logger.info(f"Downloading from HuggingFace Hub: {path}")
-            local_dir = snapshot_download(
-                repo_id=path,
-                allow_patterns=["*.safetensors", "*.json", "*.model", "tokenizer*"],
-                ignore_patterns=["*.msgpack", "*.h5", "*.ot"],
-            )
-            return Path(local_dir)
-
+            from huggingface_hub import snapshot_download, HfApi
         except ImportError:
             raise ImportError(
                 "huggingface_hub is required to download models. "
                 "Install with: pip install graviton-ai[huggingface]"
             )
+
+        short_name = path.split("/")[-1]
+        self._report_progress(f"Downloading {short_name}...")
+
+        # Determine download size and choose the right file patterns
+        allow_patterns = ["*.json", "*.model", "tokenizer*"]
+        total_bytes = 0
+
+        try:
+            api = HfApi()
+            info = api.model_info(path, files_metadata=True)
+            safetensor_files = [
+                s for s in info.siblings
+                if s.rfilename.endswith(".safetensors") and s.size
+            ]
+
+            has_sharded = any(
+                "model-" in s.rfilename and "-of-" in s.rfilename
+                for s in safetensor_files
+            )
+            has_consolidated = any(
+                s.rfilename == "consolidated.safetensors"
+                for s in safetensor_files
+            )
+
+            if has_sharded:
+                allow_patterns.append("model-*.safetensors")
+                allow_patterns.append("model.safetensors.index.json")
+                total_bytes = sum(
+                    s.size for s in safetensor_files
+                    if "model-" in s.rfilename and "-of-" in s.rfilename
+                )
+            elif has_consolidated:
+                allow_patterns.append("consolidated.safetensors")
+                total_bytes = sum(
+                    s.size for s in safetensor_files
+                    if s.rfilename == "consolidated.safetensors"
+                )
+            else:
+                allow_patterns.append("*.safetensors")
+                total_bytes = sum(s.size for s in safetensor_files)
+
+            if total_bytes > 0:
+                gb = total_bytes / (1024 ** 3)
+                self._report_progress(
+                    f"Downloading {short_name} ({gb:.1f} GB)..."
+                )
+        except Exception:
+            allow_patterns.append("*.safetensors")
+
+        # Start a background monitor to track download progress via cache
+        import threading
+        download_done = threading.Event()
+        cache_dir = None
+
+        try:
+            from huggingface_hub.constants import HF_HUB_CACHE
+            cache_dir = Path(HF_HUB_CACHE)
+        except Exception:
+            pass
+
+        def _monitor_download():
+            if not cache_dir or total_bytes <= 0:
+                return
+            model_cache = cache_dir / f"models--{path.replace('/', '--')}"
+            blobs_dir = model_cache / "blobs"
+            while not download_done.is_set():
+                try:
+                    if blobs_dir.exists():
+                        downloaded = sum(
+                            f.stat().st_size for f in blobs_dir.iterdir()
+                            if f.is_file()
+                        )
+                        gb_done = downloaded / (1024 ** 3)
+                        gb_total = total_bytes / (1024 ** 3)
+                        self._report_progress(
+                            f"Downloading {short_name} "
+                            f"({gb_done:.1f} / {gb_total:.1f} GB)"
+                        )
+                except Exception:
+                    pass
+                download_done.wait(timeout=2)
+
+        monitor = threading.Thread(target=_monitor_download, daemon=True)
+        monitor.start()
+
+        try:
+            local_dir = snapshot_download(
+                repo_id=path,
+                allow_patterns=allow_patterns,
+                ignore_patterns=["*.msgpack", "*.h5", "*.ot"],
+            )
+            return Path(local_dir)
+        except Exception as exc:
+            msg = str(exc)
+            if "gated" in msg.lower() or "access" in msg.lower():
+                raise RuntimeError(
+                    f"Access denied for '{path}'. This model requires you to "
+                    f"accept its license at https://huggingface.co/{path} "
+                    f"and set a HuggingFace token."
+                ) from exc
+            if "401" in msg or "unauthorized" in msg.lower():
+                raise RuntimeError(
+                    f"Authentication failed for '{path}'. "
+                    f"Check your HuggingFace token."
+                ) from exc
+            if "404" in msg or "not found" in msg.lower():
+                raise RuntimeError(
+                    f"Model '{path}' not found on HuggingFace."
+                ) from exc
+            raise
+        finally:
+            download_done.set()
+            monitor.join(timeout=5)
 
     def _report_progress(self, message: str):
         """Forward a progress message to the optional callback."""

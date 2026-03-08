@@ -2,7 +2,7 @@
   <img src="assets/logo.svg" alt="Graviton" width="250"/>
 </p>
 <h1 align="center">Graviton</h1>
-<p align="center"><em>Run powerful AI models on your own computer.</em></p>
+<p align="center"><em>500B+ parameter LLMs. Locally. On a Mac Mini.</em></p>
 
 <p align="center">
   <a href="#one-command-install">Get Started</a> &bull;
@@ -16,14 +16,14 @@
 
 ## What is Graviton?
 
-**Graviton** is a free, open-source engine that runs AI models on hardware you already own. A 72B model that normally needs a $10,000 GPU server? Graviton compresses it to **36 GB** and loads it piece by piece on a Mac with 64 GB of RAM.
+The most powerful AI models shouldn't belong to a handful of corporations. **Graviton** is the open-source engine that breaks AI free from cloud monopolies and puts it on hardware you already own. A 72B model? Compressed to **36 GB**, streamed layer by layer onto a Mac Mini.
 
 | What It Does | How |
 |---|---|
-| **Run 70B+ models on a laptop** | Streams each layer from disk, compresses in-flight, frees the original — never needs the full model in memory |
-| **Shrink models 4–10x** | Compresses 16-bit weights to 4-bit, 2-bit, or 1.58-bit — a 144 GB model becomes 36 GB |
-| **Smart compression** | Critical layers get higher precision, less important layers get more aggressive compression |
-| **Fast generation** | Predicts multiple tokens at once, skips unnecessary computation — 2–3x faster output |
+| **Run 500B+ models locally** | Streams each layer from disk, compresses in-flight, frees the original — the model never has to fit in memory all at once |
+| **Shrink models 4–10x** | 16-bit weights compressed to 4-bit, 2-bit, or 1.58-bit — a 144 GB model becomes 36 GB |
+| **Smart compression** | Critical layers keep higher precision, less important layers get aggressive compression |
+| **2–3x faster generation** | Predicts multiple tokens at once, skips 70% of unnecessary computation |
 | **Stream from SSD** | Memory-maps weights from your SSD — even a 1 TB model can run with 16 GB RAM |
 | **Works everywhere** | Apple Silicon (MPS), NVIDIA GPU (CUDA), or CPU |
 
