@@ -270,18 +270,26 @@ class GravitonEngine:
                         dt = now - prev_time
                         if dt > 0.5 and prev_bytes > 0:
                             delta = downloaded - prev_bytes
-                            speed_mbps = (delta / (1024 ** 2)) / dt
+                            speed_mbps = max(0, (delta / (1024 ** 2)) / dt)
                         prev_bytes = downloaded
                         prev_time = now
-                        gb_done = downloaded / (1024 ** 3)
+                        capped = min(downloaded, total_bytes)
+                        gb_done = capped / (1024 ** 3)
                         gb_total = total_bytes / (1024 ** 3)
-                        speed_str = ""
-                        if speed_mbps > 0:
-                            speed_str = f" @ {speed_mbps:.0f} MB/s"
-                        self._report_progress(
-                            f"Downloading {short_name} "
-                            f"({gb_done:.2f} / {gb_total:.2f} GB{speed_str})"
-                        )
+                        if downloaded >= total_bytes:
+                            self._report_progress(
+                                f"Verifying {short_name} "
+                                f"({gb_total:.2f} GB)"
+                            )
+                        else:
+                            speed_str = ""
+                            if speed_mbps > 1:
+                                speed_str = f" @ {speed_mbps:.0f} MB/s"
+                            self._report_progress(
+                                f"Downloading {short_name} "
+                                f"({gb_done:.2f} / {gb_total:.2f} GB"
+                                f"{speed_str})"
+                            )
                 except Exception:
                     pass
                 download_done.wait(timeout=1)
