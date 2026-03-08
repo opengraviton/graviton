@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "graviton-ai"
 version = "0.1.0"
-description = "Ultra-efficient AI inference engine — run massive models on minimal hardware"
+description = "Open-source AI inference engine — run 70B+ parameter LLMs on consumer hardware with streaming layer-by-layer quantization"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.9"
@@ -16,6 +16,8 @@ keywords = [
     "ai", "inference", "quantization", "compression",
     "llm", "transformer", "efficient", "optimization",
     "apple-silicon", "ternary", "sparsity",
+    "streaming-loading", "layer-by-layer", "70b-model",
+    "consumer-hardware", "local-llm", "democratize-ai",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -52,12 +54,18 @@ huggingface = [
     "huggingface-hub>=0.16.0",
     "sentencepiece>=0.1.99",
 ]
+api = [
+    "graviton-ai[huggingface]",
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.22.0",
+]
 all = [
-    "graviton-ai[dev,huggingface]",
+    "graviton-ai[dev,huggingface,api]",
 ]
 
 [project.scripts]
 graviton = "graviton.cli.main:main"
+graviton-api = "graviton.api.__main__:main"
 
 [project.urls]
 Homepage = "https://opengraviton.github.io"
