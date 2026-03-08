@@ -111,6 +111,10 @@ async def load_model(req: LoadRequest):
             raise _CancelledError("Loading cancelled")
         state.load_stage = msg
 
+    def _check_cancel():
+        if state._cancel_requested:
+            raise _CancelledError("Cancelled")
+
     def _load():
         try:
             from graviton.core.config import GravitonConfig, QuantMode
@@ -120,6 +124,7 @@ async def load_model(req: LoadRequest):
                 os.environ["HF_TOKEN"] = req.hf_token
                 os.environ["HUGGING_FACE_HUB_TOKEN"] = req.hf_token
 
+            _check_cancel()
             state.load_stage = "Building config..."
             config = GravitonConfig(
                 model_path=req.model_id,
@@ -136,12 +141,16 @@ async def load_model(req: LoadRequest):
             if req.speculative:
                 config.decoding.num_speculative_tokens = req.spec_tokens
 
+            _check_cancel()
             state.load_stage = "Creating engine..."
             engine = GravitonEngine(config=config)
             engine.progress_callback = _on_progress
 
-            state.load_stage = "Downloading & loading weights..."
+            _check_cancel()
+            state.load_stage = "Downloading model files..."
             engine.load_model()
+
+            _check_cancel()
 
             if req.no_quantize:
                 qlabel = "FP16"
@@ -157,15 +166,16 @@ async def load_model(req: LoadRequest):
                 "speculative": req.speculative,
                 "bits": req.bits,
             }
+            state.loading = False
+            state.load_stage = ""
         except _CancelledError:
             logger.info("Model loading cancelled")
         except Exception as exc:
             if not state._cancel_requested:
                 logger.exception("Model load failed")
                 state.error = str(exc)
-        finally:
-            state.loading = False
-            state.load_stage = ""
+                state.loading = False
+                state.load_stage = ""
 
     threading.Thread(target=_load, daemon=True).start()
     return {"status": "loading", "model_id": req.model_id}
@@ -190,8 +200,9 @@ async def cancel_loading():
     if not state.loading:
         return {"status": "not_loading"}
     state._cancel_requested = True
-    state.load_stage = "Cancelling..."
-    return {"status": "cancelling"}
+    state.loading = False
+    state.load_stage = ""
+    return {"status": "cancelled"}
 
 
 @app.post("/api/models/unload")
