@@ -159,8 +159,8 @@ class EfficientAttention(nn.Module):
             kv_cache.update(layer_idx, key_states, value_states)
             cached_k, cached_v = kv_cache.get(layer_idx)
             if cached_k is not None and cached_v is not None:
-                key_states = cached_k.to(query_states.dtype)
-                value_states = cached_v.to(query_states.dtype)
+                key_states = cached_k if cached_k.dtype == query_states.dtype else cached_k.to(query_states.dtype)
+                value_states = cached_v if cached_v.dtype == query_states.dtype else cached_v.to(query_states.dtype)
 
         # Repeat KV heads for Grouped Query Attention
         if self.num_key_value_groups > 1:

@@ -214,6 +214,81 @@ def test_kv_cache_truncate_to_zero():
     assert k.shape[-2] == 0
 
 
+# ── Fast-path KV cache (uncompressed) ──────────────────────────────
+
+
+def test_kv_cache_fast_path_basic():
+    """Fast path: pre-allocated buffers, zero-copy views."""
+    cache = KVCacheCompressor(
+        num_layers=2, num_heads=2, head_dim=4, max_length=32, compress=False
+    )
+    k = torch.randn(1, 2, 3, 4)
+    v = torch.randn(1, 2, 3, 4)
+    cache.update(0, k, v)
+
+    got_k, got_v = cache.get(0)
+    assert got_k.shape == (1, 2, 3, 4)
+    assert torch.allclose(got_k, k)
+    assert torch.allclose(got_v, v)
+
+
+def test_kv_cache_fast_path_incremental():
+    """Fast path should append correctly over multiple updates."""
+    cache = KVCacheCompressor(
+        num_layers=1, num_heads=1, head_dim=4, max_length=64, compress=False
+    )
+    cache.update(0, torch.randn(1, 1, 5, 4), torch.randn(1, 1, 5, 4))
+    cache.update(0, torch.randn(1, 1, 3, 4), torch.randn(1, 1, 3, 4))
+    cache.update(0, torch.randn(1, 1, 1, 4), torch.randn(1, 1, 1, 4))
+
+    k, v = cache.get(0)
+    assert k.shape[-2] == 9
+    assert cache.get_positions()[0] == 9
+
+
+def test_kv_cache_fast_path_preserves_dtype():
+    """Fast path should NOT change dtype (no quantize/dequantize)."""
+    cache = KVCacheCompressor(
+        num_layers=1, num_heads=1, head_dim=4, max_length=32, compress=False
+    )
+    k = torch.randn(1, 1, 2, 4, dtype=torch.float16)
+    v = torch.randn(1, 1, 2, 4, dtype=torch.float16)
+    cache.update(0, k, v)
+
+    got_k, got_v = cache.get(0)
+    assert got_k.dtype == torch.float16
+    assert got_v.dtype == torch.float16
+
+
+def test_kv_cache_fast_path_truncate():
+    """Fast path truncate should just move the length pointer."""
+    cache = KVCacheCompressor(
+        num_layers=2, num_heads=1, head_dim=4, max_length=64, compress=False
+    )
+    cache.update(0, torch.randn(1, 1, 10, 4), torch.randn(1, 1, 10, 4))
+    cache.update(1, torch.randn(1, 1, 10, 4), torch.randn(1, 1, 10, 4))
+
+    cache.truncate_to({0: 5, 1: 5})
+    assert cache.get_positions()[0] == 5
+
+    k, v = cache.get(0)
+    assert k.shape[-2] == 5
+
+
+def test_kv_cache_compressed_still_works():
+    """Compressed mode should still function (regression test)."""
+    cache = KVCacheCompressor(
+        num_layers=2, num_heads=2, head_dim=8, max_length=64, compress=True
+    )
+    k = torch.randn(1, 2, 5, 8)
+    v = torch.randn(1, 2, 5, 8)
+    cache.update(0, k, v)
+
+    got_k, got_v = cache.get(0)
+    assert got_k.shape == (1, 2, 5, 8)
+    assert cache.get_positions()[0] == 5
+
+
 # ── Device-aware quantizer operations ───────────────────────────────
 
 

@@ -29,7 +29,7 @@ Modern AI models are getting bigger — GPT-4 class models have hundreds of bill
 | ⚡ **Dynamic Sparsity** | 2-10x faster | Only activate relevant neurons per token |
 | 💾 **Layer Streaming** | ∞ model size | Stream layers from SSD via memory-mapped files |
 | 🎯 **Speculative Decoding** | 2-3x faster | Layer-skip draft model predicts, full model verifies |
-| 🗜️ **KV-Cache Compression** | 4-8x less memory | Compress attention cache with snapshot/rollback support |
+| 🗜️ **KV-Cache (Fast + Compressed)** | Zero overhead | Pre-allocated buffers (fast) or INT8 compressed (long-context) |
 
 ### The Math
 
@@ -289,11 +289,11 @@ To find the exact limits of Apple Silicon Unified Memory, we ran a synthetic ten
 
 ## 🧪 Testing
 
-Graviton has a comprehensive test suite covering every component of the engine — **83 tests across 10 test modules**, all passing:
+Graviton has a comprehensive test suite covering every component of the engine — **88 tests across 10 test modules**, all passing:
 
 ```bash
 pytest tests/ -v
-# ============================== 83 passed in 1.17s ==============================
+# ============================== 88 passed in 2.46s ==============================
 ```
 
 | Test Module | Tests | Coverage Area |
@@ -306,7 +306,7 @@ pytest tests/ -v
 | `test_mixed_precision.py` | 11 | Layer-bit selection, overrides, sensitivity scores, quantize/dequantize roundtrip |
 | `test_model.py` | 11 | GravitonCausalLM forward pass, KV cache, layer_skip, quantize_weights (linear/ternary/mixed) |
 | `test_quantization.py` | 3 | INT8 quantize/dequantize, ternary packing, ternary matmul correctness |
-| `test_quantized_linear.py` | 14 | QuantizedLinear INT4/INT8/ternary roundtrip, bias handling, device transfer, KV cache snapshot/truncate |
+| `test_quantized_linear.py` | 19 | QuantizedLinear INT4/INT8/ternary roundtrip, bias handling, device transfer, KV cache fast-path + compressed mode |
 | `test_sparsity.py` | 2 | TopK activation sparsity, identity pass-through |
 | `test_transformer.py` | 5 | TransformerBlock forward pass, KV cache integration, residual connections |
 
@@ -325,7 +325,7 @@ We welcome contributions! Here's how to get started:
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feature/amazing-feature`
 3. Make your changes and add tests
-4. Run the full test suite: `pytest tests/ -v` (all 83 tests must pass)
+4. Run the full test suite: `pytest tests/ -v` (all 88 tests must pass)
 5. Submit a pull request
 
 ### Development Setup
@@ -334,7 +334,7 @@ We welcome contributions! Here's how to get started:
 git clone https://github.com/opengraviton/graviton.git
 cd graviton
 pip install -e ".[all]"
-pytest tests/ -v   # 83 tests, ~1 second
+pytest tests/ -v   # 88 tests, ~2 seconds
 ```
 
 ## 📄 License

@@ -352,6 +352,11 @@ class GravitonEngine:
         generated_ids: list[int] = []
         prev_text = ""
 
+        # Pre-build the prompt id list once for repetition penalty
+        prompt_id_list = input_ids[0].tolist()
+        # Re-usable single-token input tensor (avoid allocation per step)
+        token_buf = torch.zeros(1, 1, dtype=torch.long, device=device)
+
         with torch.no_grad():
             logits = model(input_ids, start_pos=0)
             next_logits = logits[:, -1, :].float()
@@ -372,14 +377,18 @@ class GravitonEngine:
 
             current_pos = prompt_len
             for _step in range(max_tokens - 1):
-                token_input = torch.tensor([[next_token_id]], device=device)
-                logits = model(token_input, start_pos=current_pos)
+                token_buf[0, 0] = next_token_id
+                logits = model(token_buf, start_pos=current_pos)
                 next_logits = logits[:, -1, :].float()
 
-                all_ids = input_ids[0].tolist() + generated_ids
-                prev_tokens = torch.tensor([all_ids], device=device)
+                if self.sampler.repetition_penalty != 1.0:
+                    prev_tokens = torch.tensor(
+                        [prompt_id_list + generated_ids], device=device
+                    )
+                    next_token = self.sampler(next_logits, previous_tokens=prev_tokens)
+                else:
+                    next_token = self.sampler(next_logits)
 
-                next_token = self.sampler(next_logits, previous_tokens=prev_tokens)
                 next_token_id = next_token.item()
 
                 if next_token_id == tokenizer.eos_token_id:
