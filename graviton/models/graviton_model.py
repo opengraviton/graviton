@@ -7,10 +7,12 @@ Supports LLaMA-family architectures (LLaMA, TinyLlama, Mistral, etc.).
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
+from collections import defaultdict
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Callable
 
 import torch
 import torch.nn as nn
@@ -280,3 +282,232 @@ class GravitonCausalLM(nn.Module):
                 mapped["lm_head.weight"] = mapped["embed_tokens.weight"]
 
         return mapped
+
+    # ------------------------------------------------------------------
+    # Streaming weight loading (for large models)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_pretrained_dir_streaming(
+        cls,
+        model_dir: Path,
+        engine_config=None,
+        dtype: torch.dtype = torch.float32,
+        quantizer=None,
+        target_device: torch.device = torch.device("cpu"),
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> "GravitonCausalLM":
+        """
+        Stream-load a large model layer by layer with on-the-fly quantization.
+
+        Peak memory ≈ 1 FP16 layer + all previously quantized layers,
+        enabling models that far exceed available RAM in their FP16 form.
+        """
+        config_path = model_dir / "config.json"
+        if not config_path.exists():
+            raise FileNotFoundError(f"No config.json found in {model_dir}")
+
+        with open(config_path) as f:
+            model_config = json.load(f)
+
+        num_layers = model_config["num_hidden_layers"]
+
+        def _progress(msg: str):
+            logger.info(msg)
+            if progress_callback:
+                progress_callback(msg)
+
+        _progress("Building model skeleton...")
+
+        weight_index = cls._build_weight_index(model_dir, model_config)
+
+        with torch.device("meta"):
+            model = cls(model_config, engine_config)
+
+        # RoPE uses register_buffer; recreate on CPU to avoid meta tensors
+        head_dim = model_config["hidden_size"] // model_config["num_attention_heads"]
+        model.rope = RotaryPositionEmbedding(
+            dim=head_dim,
+            max_position_embeddings=model_config.get("max_position_embeddings", 2048),
+            base=model_config.get("rope_theta", 10000.0),
+        )
+
+        # --- Non-layer weights (embeddings, final norm, lm_head) ---
+        _progress("Loading embeddings & head...")
+
+        non_layer_keys = {
+            k: v for k, v in weight_index.items()
+            if not k.startswith("layers.")
+        }
+
+        model.embed_tokens = model.embed_tokens.to_empty(device="cpu")
+        model.norm = model.norm.to_empty(device="cpu")
+        model.lm_head = model.lm_head.to_empty(device="cpu")
+
+        non_layer_state = cls._batch_load_tensors(non_layer_keys)
+        model.load_state_dict(non_layer_state, strict=False)
+        del non_layer_state
+
+        model.embed_tokens = model.embed_tokens.to(dtype).to(target_device)
+        model.norm = model.norm.to(dtype).to(target_device)
+        model.lm_head = model.lm_head.to(dtype).to(target_device)
+        model.rope = model.rope.to(target_device)
+
+        # --- Transformer layers: load → quantize → move, one at a time ---
+        for i in range(num_layers):
+            _progress(f"Loading layer {i + 1}/{num_layers}...")
+
+            layer_prefix = f"layers.{i}."
+            layer_keys = {
+                k: v for k, v in weight_index.items()
+                if k.startswith(layer_prefix)
+            }
+
+            model.layers[i] = model.layers[i].to_empty(device="cpu")
+
+            layer_state = {}
+            shards = defaultdict(list)
+            for param_name, (shard_file, orig_key) in layer_keys.items():
+                shards[shard_file].append((param_name, orig_key))
+
+            for shard_file, keys in shards.items():
+                tensors = cls._load_tensors_from_shard(shard_file, [k for _, k in keys])
+                for param_name, orig_key in keys:
+                    local_name = param_name[len(layer_prefix):]
+                    layer_state[local_name] = tensors[orig_key].to(dtype)
+
+            model.layers[i].load_state_dict(layer_state, strict=False)
+            del layer_state
+
+            model.layers[i] = model.layers[i].to(target_device)
+
+            if quantizer:
+                cls._quantize_single_layer(model.layers[i], quantizer, f"layers.{i}")
+
+            gc.collect()
+            if target_device.type == "mps":
+                torch.mps.empty_cache()
+
+        model.eval()
+
+        param_count = sum(p.numel() for p in model.parameters())
+        param_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+        buf_bytes = sum(b.numel() * b.element_size() for b in model.buffers())
+        total_gb = (param_bytes + buf_bytes) / (1024 ** 3)
+        _progress(f"Model ready: {param_count / 1e9:.1f}B params, {total_gb:.1f} GB")
+
+        return model
+
+    @classmethod
+    def _build_weight_index(
+        cls, model_dir: Path, model_config: dict,
+    ) -> Dict[str, tuple]:
+        """
+        Map every remapped weight name to ``(shard_file_path, original_key)``.
+
+        Supports sharded safetensors (with index.json), single safetensors,
+        and legacy pytorch .bin files.
+        """
+        index: Dict[str, tuple] = {}
+
+        index_file = model_dir / "model.safetensors.index.json"
+        if index_file.exists():
+            with open(index_file) as f:
+                shard_data = json.load(f)
+            for orig_key, shard_name in shard_data.get("weight_map", {}).items():
+                remapped = orig_key
+                if remapped.startswith("model."):
+                    remapped = remapped[len("model."):]
+                index[remapped] = (str(model_dir / shard_name), orig_key)
+        else:
+            sf_files = sorted(model_dir.glob("*.safetensors"))
+            if sf_files:
+                from safetensors import safe_open
+
+                for sf_path in sf_files:
+                    with safe_open(str(sf_path), framework="pt") as sf:
+                        for orig_key in sf.keys():
+                            remapped = orig_key
+                            if remapped.startswith("model."):
+                                remapped = remapped[len("model."):]
+                            index[remapped] = (str(sf_path), orig_key)
+            else:
+                for bin_path in sorted(model_dir.glob("*.bin")):
+                    state = torch.load(str(bin_path), map_location="cpu", weights_only=True)
+                    for orig_key in state.keys():
+                        remapped = orig_key
+                        if remapped.startswith("model."):
+                            remapped = remapped[len("model."):]
+                        index[remapped] = (str(bin_path), orig_key)
+                    del state
+
+        if model_config.get("tie_word_embeddings", False):
+            if "lm_head.weight" not in index and "embed_tokens.weight" in index:
+                index["lm_head.weight"] = index["embed_tokens.weight"]
+
+        logger.info(f"Weight index: {len(index)} tensors mapped")
+        return index
+
+    @staticmethod
+    def _load_tensors_from_shard(
+        shard_path: str, keys: list[str],
+    ) -> Dict[str, torch.Tensor]:
+        """Load specific tensors from a single shard file (safetensors or bin)."""
+        tensors: Dict[str, torch.Tensor] = {}
+        if shard_path.endswith(".safetensors"):
+            from safetensors import safe_open
+
+            with safe_open(shard_path, framework="pt", device="cpu") as sf:
+                for key in keys:
+                    tensors[key] = sf.get_tensor(key)
+        else:
+            state = torch.load(shard_path, map_location="cpu", weights_only=True)
+            for key in keys:
+                tensors[key] = state[key]
+        return tensors
+
+    @classmethod
+    def _batch_load_tensors(
+        cls, key_map: Dict[str, tuple],
+    ) -> Dict[str, torch.Tensor]:
+        """Load a set of tensors, batching reads by shard file."""
+        shards: Dict[str, list] = defaultdict(list)
+        for param_name, (shard_file, orig_key) in key_map.items():
+            shards[shard_file].append((param_name, orig_key))
+
+        result: Dict[str, torch.Tensor] = {}
+        for shard_file, keys in shards.items():
+            tensors = cls._load_tensors_from_shard(shard_file, [k for _, k in keys])
+            for param_name, orig_key in keys:
+                result[param_name] = tensors[orig_key]
+        return result
+
+    @staticmethod
+    def _quantize_single_layer(layer: nn.Module, quantizer, layer_name_prefix: str):
+        """Quantize all nn.Linear modules in a single transformer layer in-place."""
+        from graviton.quantization.quantized_linear import QuantizedLinear
+        from graviton.quantization.mixed_precision import MixedPrecisionQuantizer
+
+        is_mixed = isinstance(quantizer, MixedPrecisionQuantizer)
+        skip_patterns = ["norm"]
+
+        for name, module in list(layer.named_modules()):
+            if not isinstance(module, nn.Linear):
+                continue
+            if any(p in name for p in skip_patterns):
+                continue
+
+            full_name = f"{layer_name_prefix}.{name}"
+            if is_mixed:
+                bits = quantizer.get_layer_bits(full_name)
+                lq = quantizer._get_quantizer(bits)
+            else:
+                lq = quantizer
+
+            qlinear = QuantizedLinear.from_linear(module, lq)
+
+            parts = name.split(".")
+            parent = layer
+            for p in parts[:-1]:
+                parent = getattr(parent, p)
+            setattr(parent, parts[-1], qlinear)

@@ -71,6 +71,9 @@ class GravitonEngine:
         self._tokenizer = None
         self._model_config = None
 
+        # Optional callback for reporting loading progress (e.g. to UI)
+        self.progress_callback = None
+
         logger.info("Graviton Engine initialized")
         if self.config.verbose:
             print(self.hardware.summary())
@@ -195,34 +198,92 @@ class GravitonEngine:
                 "Install with: pip install graviton-ai[huggingface]"
             )
 
+    def _report_progress(self, message: str):
+        """Forward a progress message to the optional callback."""
+        logger.info(message)
+        if self.progress_callback:
+            self.progress_callback(message)
+
+    def _estimate_fp16_gb(self, model_dir: Path) -> float:
+        """Estimate FP16 model size in GB from config.json."""
+        import json as _json
+
+        config_path = model_dir / "config.json"
+        with open(config_path) as f:
+            mc = _json.load(f)
+
+        hidden = mc.get("hidden_size", 4096)
+        num_layers = mc.get("num_hidden_layers", 32)
+        vocab = mc.get("vocab_size", 32000)
+        intermediate = mc.get("intermediate_size", hidden * 4)
+        num_kv_heads = mc.get("num_key_value_heads", mc.get("num_attention_heads", 32))
+        num_heads = mc.get("num_attention_heads", 32)
+        head_dim = hidden // num_heads
+
+        attn_params = hidden * (num_heads + 2 * num_kv_heads + num_heads) * head_dim
+        mlp_params = 3 * hidden * intermediate
+        per_layer = attn_params + mlp_params
+        total = per_layer * num_layers + vocab * hidden * 2
+        return (total * 2) / (1024 ** 3)
+
     def _build_inference_model(self, model_dir: Path):
-        """Build the full inference model from a local directory."""
+        """
+        Build the full inference model from a local directory.
+
+        Automatically chooses between direct loading (small models that
+        fit in RAM as FP16) and streaming layer-by-layer loading with
+        on-the-fly quantization (large models).
+        """
         from graviton.models.graviton_model import GravitonCausalLM
         from graviton.core.config import QuantMode
 
-        logger.info("Building inference model...")
-        self._model = GravitonCausalLM.from_pretrained_dir(
-            model_dir,
-            engine_config=self.config,
-            dtype=self.dtype,
-        )
-        self._model.to(self.device)
-        self._model.eval()
-        self._model_config = self._model.model_config
+        fp16_gb = self._estimate_fp16_gb(model_dir)
+        use_streaming = fp16_gb > self.hardware.available_memory_gb * 0.7
 
-        # Apply weight quantization if configured
-        if (
-            self.quantizer is not None
-            and self.config.quantization.mode != QuantMode.NONE
-        ):
-            logger.info(f"Applying {self.config.quantization.mode.value} quantization to model weights...")
-            self._model.quantize_weights(self.quantizer)
+        if use_streaming:
+            self._report_progress(
+                f"Large model (~{fp16_gb:.0f} GB FP16) — streaming layer-by-layer..."
+            )
 
-        param_count = sum(p.numel() for p in self._model.parameters())
-        buf_bytes = sum(b.numel() * b.element_size() for b in self._model.buffers())
-        param_bytes = sum(p.numel() * p.element_size() for p in self._model.parameters())
-        total_gb = (param_bytes + buf_bytes) / (1024**3)
-        logger.info(f"Model ready: {param_count / 1e9:.2f}B params, {total_gb:.2f} GB on {self.device}")
+            quantizer = None
+            if (
+                self.quantizer is not None
+                and self.config.quantization.mode != QuantMode.NONE
+            ):
+                quantizer = self.quantizer
+
+            self._model = GravitonCausalLM.from_pretrained_dir_streaming(
+                model_dir,
+                engine_config=self.config,
+                dtype=self.dtype,
+                quantizer=quantizer,
+                target_device=self.device,
+                progress_callback=self._report_progress,
+            )
+            self._model_config = self._model.model_config
+        else:
+            logger.info("Building inference model...")
+            self._model = GravitonCausalLM.from_pretrained_dir(
+                model_dir,
+                engine_config=self.config,
+                dtype=self.dtype,
+            )
+            self._model.to(self.device)
+            self._model.eval()
+            self._model_config = self._model.model_config
+
+            if (
+                self.quantizer is not None
+                and self.config.quantization.mode != QuantMode.NONE
+            ):
+                logger.info(f"Applying {self.config.quantization.mode.value} quantization...")
+                self._model.quantize_weights(self.quantizer)
+
+            param_count = sum(p.numel() for p in self._model.parameters())
+            buf_bytes = sum(b.numel() * b.element_size() for b in self._model.buffers())
+            param_bytes = sum(p.numel() * p.element_size() for p in self._model.parameters())
+            total_gb = (param_bytes + buf_bytes) / (1024 ** 3)
+            logger.info(f"Model ready: {param_count / 1e9:.2f}B params, {total_gb:.2f} GB on {self.device}")
 
         self._load_tokenizer(model_dir)
 
