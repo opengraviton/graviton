@@ -451,6 +451,41 @@ class GravitonEngine:
                 "Install with: pip install graviton-ai[huggingface]"
             )
 
+    def format_chat_prompt(
+        self,
+        system: str,
+        history: list,
+        message: str,
+    ) -> Optional[str]:
+        """
+        Format system + history + message using the tokenizer's chat template.
+        Returns None if the tokenizer has no chat_template (caller should fall back).
+        """
+        if self._tokenizer is None:
+            return None
+        tokenizer = self._tokenizer
+        if not getattr(tokenizer, "chat_template", None):
+            return None
+        messages: list[dict[str, str]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        for msg in history:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role in ("user", "assistant", "system"):
+                messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": message})
+        try:
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            return prompt if isinstance(prompt, str) else None
+        except Exception:
+            logger.debug("apply_chat_template failed, use fallback formatting")
+            return None
+
     # ------------------------------------------------------------------
     # Text generation
     # ------------------------------------------------------------------
