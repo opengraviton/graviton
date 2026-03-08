@@ -255,6 +255,10 @@ class GravitonEngine:
                 return
             model_cache = cache_dir / f"models--{path.replace('/', '--')}"
             blobs_dir = model_cache / "blobs"
+            prev_bytes = 0
+            import time as _time
+            prev_time = _time.monotonic()
+            speed_mbps = 0.0
             while not download_done.is_set():
                 try:
                     if blobs_dir.exists():
@@ -262,15 +266,25 @@ class GravitonEngine:
                             f.stat().st_size for f in blobs_dir.iterdir()
                             if f.is_file()
                         )
+                        now = _time.monotonic()
+                        dt = now - prev_time
+                        if dt > 0.5 and prev_bytes > 0:
+                            delta = downloaded - prev_bytes
+                            speed_mbps = (delta / (1024 ** 2)) / dt
+                        prev_bytes = downloaded
+                        prev_time = now
                         gb_done = downloaded / (1024 ** 3)
                         gb_total = total_bytes / (1024 ** 3)
+                        speed_str = ""
+                        if speed_mbps > 0:
+                            speed_str = f" @ {speed_mbps:.0f} MB/s"
                         self._report_progress(
                             f"Downloading {short_name} "
-                            f"({gb_done:.1f} / {gb_total:.1f} GB)"
+                            f"({gb_done:.2f} / {gb_total:.2f} GB{speed_str})"
                         )
                 except Exception:
                     pass
-                download_done.wait(timeout=2)
+                download_done.wait(timeout=1)
 
         monitor = threading.Thread(target=_monitor_download, daemon=True)
         monitor.start()
