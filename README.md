@@ -112,13 +112,13 @@ print(response)
 graviton info
 
 # Run inference with a small open model
-graviton run TinyLlama/TinyLlama-1.1B-Chat-v1.0 --prompt "Hello, world!"
+graviton run TinyLlama/TinyLlama-1.1B-Chat-v1.0 --prompt 'Hello, world!'
 
 # Quantize a model
 graviton quantize TinyLlama/TinyLlama-1.1B-Chat-v1.0 --bits 4 --output ./models/tinyllama-4bit
 
 # Run inference on the quantized model
-graviton run ./models/tinyllama-4bit --prompt "Hello, world!"
+graviton run ./models/tinyllama-4bit --prompt 'Hello, world!'
 
 # Benchmark performance
 graviton benchmark
