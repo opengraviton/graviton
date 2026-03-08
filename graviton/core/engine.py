@@ -39,10 +39,10 @@ class GravitonEngine:
 
     Example:
         >>> from graviton import GravitonEngine, GravitonConfig
-        >>> config = GravitonConfig(quant_bits=4, max_memory_gb=16)
-        >>> engine = GravitonEngine(model_path="path/to/model", config=config)
-        >>> output = engine.generate("Hello, world!", max_tokens=100)
-        >>> print(output)
+        >>> config = GravitonConfig(model_path="TinyLlama/TinyLlama-1.1B-Chat-v1.0", quant_bits=4)
+        >>> engine = GravitonEngine(config=config)
+        >>> engine.load_model()
+        >>> print(engine.generate("Hello!", max_tokens=50))
     """
 
     def __init__(
@@ -50,21 +50,12 @@ class GravitonEngine:
         model_path: Optional[str] = None,
         config: Optional[GravitonConfig] = None,
     ):
-        """
-        Initialize the Graviton Engine.
-
-        Args:
-            model_path: Path to the model (local path or HuggingFace model ID).
-            config: Engine configuration. If None, auto-detects optimal config.
-        """
         self.config = config or GravitonConfig()
         self.model_path = model_path or self.config.model_path
 
-        # Detect hardware and adjust config if needed
         self.hardware = detect_hardware()
         self._auto_configure()
 
-        # Initialize components
         self.quantizer = self._init_quantizer()
         self.memory_manager = MemoryManager(self.config.memory, self.hardware)
         self.sparsity_engine = self._init_sparsity()
@@ -75,15 +66,23 @@ class GravitonEngine:
         self._model_weights = {}
         self._layer_count = 0
 
+        # Inference model and tokenizer (populated by load_model)
+        self._model = None
+        self._tokenizer = None
+        self._model_config = None
+
         logger.info("Graviton Engine initialized")
         if self.config.verbose:
             print(self.hardware.summary())
             print()
             print(self.config.summary())
 
+    # ------------------------------------------------------------------
+    # Configuration
+    # ------------------------------------------------------------------
+
     def _auto_configure(self):
         """Auto-configure based on detected hardware."""
-        # Set device if auto
         if self.config.device == DeviceType.AUTO:
             if self.hardware.has_mps:
                 self.config.device = DeviceType.MPS
@@ -92,7 +91,6 @@ class GravitonEngine:
             else:
                 self.config.device = DeviceType.CPU
 
-        # Auto-set memory budget
         if self.config.memory.max_memory_gb <= 0:
             self.config.memory.max_memory_gb = self.hardware.available_memory_gb * 0.8
             logger.info(
@@ -102,10 +100,8 @@ class GravitonEngine:
     def _init_quantizer(self):
         """Initialize the appropriate quantizer."""
         mode = self.config.quantization.mode
-
         if self.config.quantization.use_mixed_precision:
             return MixedPrecisionQuantizer(self.config.quantization)
-
         if mode == QuantMode.TERNARY:
             return TernaryQuantizer()
         elif mode in (QuantMode.INT8, QuantMode.INT4, QuantMode.INT2):
@@ -114,21 +110,18 @@ class GravitonEngine:
                 group_size=self.config.quantization.group_size,
                 symmetric=self.config.quantization.symmetric,
             )
-        else:
-            return None  # No quantization
+        return None
 
     def _init_sparsity(self):
         """Initialize the sparsity engine."""
         from graviton.core.config import SparsityMode
 
         mode = self.config.sparsity.mode
-
         if mode == SparsityMode.TOPK:
             return TopKActivation(k_ratio=self.config.sparsity.k_ratio)
         elif mode == SparsityMode.MAGNITUDE:
             return DynamicPruner(threshold=self.config.sparsity.pruning_threshold)
-        else:
-            return None
+        return None
 
     @property
     def device(self) -> torch.device:
@@ -141,12 +134,24 @@ class GravitonEngine:
         }
         return torch.device(device_map[self.config.device])
 
+    @property
+    def dtype(self) -> torch.dtype:
+        """Compute dtype based on device."""
+        if self.config.device in (DeviceType.MPS, DeviceType.CUDA):
+            return torch.float16
+        return torch.float32
+
+    # ------------------------------------------------------------------
+    # Model loading
+    # ------------------------------------------------------------------
+
     def load_model(self, model_path: Optional[str] = None):
         """
-        Load and optimize a model for inference.
+        Load a model for inference.
 
-        Args:
-            model_path: Path to model. Uses constructor path if not specified.
+        Downloads from HuggingFace if the path is not a local directory,
+        builds the full transformer model, loads weights, and prepares
+        the tokenizer.
         """
         path = model_path or self.model_path
         if path is None:
@@ -155,133 +160,79 @@ class GravitonEngine:
         logger.info(f"Loading model from: {path}")
         start_time = time.time()
 
-        # Check if path exists locally
-        model_path_obj = Path(path)
-
-        if model_path_obj.exists():
-            self._load_local_model(model_path_obj)
-        else:
-            # Attempt to load from HuggingFace
-            self._load_huggingface_model(path)
+        model_dir = self._resolve_model_dir(path)
+        self._build_inference_model(model_dir)
 
         elapsed = time.time() - start_time
         logger.info(f"Model loaded in {elapsed:.2f}s")
         self._model_loaded = True
 
-    def _load_local_model(self, path: Path):
-        """Load a model from local disk."""
-        # Check for different formats
-        if path.suffix == ".gguf":
-            self._load_gguf(path)
-        elif path.suffix == ".safetensors" or (path / "model.safetensors").exists():
-            self._load_safetensors(path)
-        elif path.suffix in (".bin", ".pt", ".pth"):
-            self._load_pytorch(path)
-        elif path.is_dir():
-            # Directory — look for model files
-            safetensors = list(path.glob("*.safetensors"))
-            bins = list(path.glob("*.bin"))
-            if safetensors:
-                self._load_safetensors(path)
-            elif bins:
-                self._load_pytorch(path)
-            else:
-                raise ValueError(f"No recognized model files in {path}")
-        else:
-            raise ValueError(f"Unrecognized model format: {path}")
+    def _resolve_model_dir(self, path: str) -> Path:
+        """
+        Ensure the model exists locally, downloading from HuggingFace
+        Hub if necessary. Returns the local directory Path.
+        """
+        local = Path(path)
+        if local.is_dir() and (
+            list(local.glob("*.safetensors")) or list(local.glob("*.bin"))
+        ):
+            return local
 
-    def _load_safetensors(self, path: Path):
-        """Load model from SafeTensors format."""
-        try:
-            from safetensors import safe_open
-
-            if path.is_dir():
-                files = sorted(path.glob("*.safetensors"))
-            else:
-                files = [path]
-
-            for f in files:
-                with safe_open(str(f), framework="pt", device="cpu") as sf:
-                    for key in sf.keys():
-                        tensor = sf.get_tensor(key)
-                        # Apply quantization
-                        if self.quantizer is not None and self._should_quantize(key):
-                            tensor = self.quantizer.quantize(tensor)
-                        self._model_weights[key] = tensor
-
-        except ImportError:
-            raise ImportError(
-                "safetensors package required. Install with: pip install safetensors"
-            )
-
-    def _load_pytorch(self, path: Path):
-        """Load model from PyTorch format."""
-        if path.is_dir():
-            files = sorted(path.glob("*.bin")) + sorted(path.glob("*.pt"))
-        else:
-            files = [path]
-
-        for f in files:
-            state_dict = torch.load(str(f), map_location="cpu", weights_only=True)
-            for key, tensor in state_dict.items():
-                if self.quantizer is not None and self._should_quantize(key):
-                    tensor = self.quantizer.quantize(tensor)
-                self._model_weights[key] = tensor
-
-    def _load_gguf(self, path: Path):
-        """Load model from GGUF format (llama.cpp compatible)."""
-        logger.warning("GGUF loading is experimental")
-        # GGUF loader will be implemented in a future version
-        raise NotImplementedError("GGUF loading coming soon")
-
-    def _load_huggingface_model(self, model_id: str):
-        """Load a model from HuggingFace Hub."""
         try:
             from huggingface_hub import snapshot_download
 
-            logger.info(f"Downloading model from HuggingFace: {model_id}")
-            local_dir = snapshot_download(model_id)
-            self._load_local_model(Path(local_dir))
+            logger.info(f"Downloading from HuggingFace Hub: {path}")
+            local_dir = snapshot_download(
+                repo_id=path,
+                allow_patterns=["*.safetensors", "*.json", "*.model", "tokenizer*"],
+                ignore_patterns=["*.msgpack", "*.h5", "*.ot"],
+            )
+            return Path(local_dir)
 
         except ImportError:
             raise ImportError(
-                "huggingface_hub required. Install with: "
-                "pip install graviton-ai[huggingface]"
+                "huggingface_hub is required to download models. "
+                "Install with: pip install graviton-ai[huggingface]"
             )
 
-    def _should_quantize(self, layer_name: str) -> bool:
-        """Determine if a layer should be quantized."""
-        # Skip embeddings and layer norms
-        skip_patterns = ["embed", "norm", "lm_head", "wte", "wpe"]
-        return not any(pattern in layer_name.lower() for pattern in skip_patterns)
+    def _build_inference_model(self, model_dir: Path):
+        """Build the full inference model from a local directory."""
+        from graviton.models.graviton_model import GravitonCausalLM
 
-    def quantize_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
-        """
-        Quantize a single tensor using the configured quantizer.
+        logger.info("Building inference model...")
+        self._model = GravitonCausalLM.from_pretrained_dir(
+            model_dir,
+            engine_config=self.config,
+            dtype=self.dtype,
+        )
+        self._model.to(self.device)
+        self._model.eval()
+        self._model_config = self._model.model_config
 
-        Args:
-            tensor: Input tensor to quantize.
+        param_count = sum(p.numel() for p in self._model.parameters())
+        mem_gb = sum(p.numel() * p.element_size() for p in self._model.parameters()) / (1024**3)
+        logger.info(f"Model ready: {param_count / 1e9:.2f}B params, {mem_gb:.2f} GB on {self.device}")
 
-        Returns:
-            Quantized tensor.
-        """
-        if self.quantizer is None:
-            return tensor
-        return self.quantizer.quantize(tensor)
+        self._load_tokenizer(model_dir)
 
-    def apply_sparsity(self, tensor: torch.Tensor) -> torch.Tensor:
-        """
-        Apply sparsity to activations.
+    def _load_tokenizer(self, model_dir: Path):
+        """Load the tokenizer from the model directory."""
+        try:
+            from transformers import AutoTokenizer
 
-        Args:
-            tensor: Activation tensor.
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                str(model_dir), trust_remote_code=False
+            )
+            logger.info(f"Tokenizer loaded: vocab_size={len(self._tokenizer)}")
+        except ImportError:
+            raise ImportError(
+                "transformers is required for tokenization. "
+                "Install with: pip install graviton-ai[huggingface]"
+            )
 
-        Returns:
-            Sparse activation tensor.
-        """
-        if self.sparsity_engine is None:
-            return tensor
-        return self.sparsity_engine(tensor)
+    # ------------------------------------------------------------------
+    # Text generation
+    # ------------------------------------------------------------------
 
     def generate(
         self,
@@ -298,25 +249,21 @@ class GravitonEngine:
         Args:
             prompt: Input text prompt.
             max_tokens: Maximum tokens to generate.
-            temperature: Sampling temperature.
+            temperature: Sampling temperature (0 = greedy).
             top_p: Top-p (nucleus) sampling.
             top_k: Top-k sampling.
-            stream: If True, returns a generator yielding tokens.
+            stream: If True, returns a generator yielding text chunks.
 
         Returns:
             Generated text string, or generator if stream=True.
         """
         max_tokens = max_tokens or self.config.decoding.max_tokens
-        temperature = temperature or self.config.decoding.temperature
-        top_p = top_p or self.config.decoding.top_p
-        top_k = top_k or self.config.decoding.top_k
-
-        logger.info(f"Generating with max_tokens={max_tokens}, temp={temperature}")
+        temperature = temperature if temperature is not None else self.config.decoding.temperature
+        top_p = top_p if top_p is not None else self.config.decoding.top_p
+        top_k = top_k if top_k is not None else self.config.decoding.top_k
 
         if not self._model_loaded:
-            raise RuntimeError(
-                "No model loaded. Call engine.load_model() first."
-            )
+            raise RuntimeError("No model loaded. Call engine.load_model() first.")
 
         if stream:
             return self._generate_stream(prompt, max_tokens, temperature, top_p, top_k)
@@ -331,13 +278,9 @@ class GravitonEngine:
         top_p: float,
         top_k: int,
     ) -> str:
-        """Generate text in batch mode."""
-        tokens = []
-        for token in self._generate_stream(
-            prompt, max_tokens, temperature, top_p, top_k
-        ):
-            tokens.append(token)
-        return "".join(tokens)
+        """Generate text in batch mode (returns complete string)."""
+        chunks = list(self._generate_stream(prompt, max_tokens, temperature, top_p, top_k))
+        return "".join(chunks)
 
     def _generate_stream(
         self,
@@ -347,78 +290,136 @@ class GravitonEngine:
         top_p: float,
         top_k: int,
     ) -> Generator[str, None, None]:
-        """Generate text token by token (streaming)."""
-        # This is a simplified generation loop
-        # Full implementation requires tokenizer and model forward pass
+        """
+        Generate text token-by-token with streaming output.
+
+        Pipeline:
+            1. Tokenize the prompt
+            2. Prefill: forward pass on full prompt, populate KV cache
+            3. Decode loop: generate one token per step using cached KV
+            4. Detokenize and yield text chunks
+        """
         logger.info("Starting token generation...")
 
-        # Placeholder — actual implementation depends on model architecture
-        # This demonstrates the pipeline flow
-        for i in range(max_tokens):
-            # In full implementation:
-            # 1. Tokenize input
-            # 2. Forward pass through transformer layers
-            #    - Apply sparsity to activations
-            #    - Use quantized weights
-            #    - Stream layers if needed
-            # 3. Sample next token
-            # 4. Detokenize and yield
-            yield ""
+        device = self.device
+        model = self._model
+        tokenizer = self._tokenizer
+
+        # Configure sampler for this generation call
+        self.sampler.temperature = temperature
+        self.sampler.top_p = top_p
+        self.sampler.top_k = top_k
+
+        # Tokenize prompt
+        inputs = tokenizer(prompt, return_tensors="pt")
+        input_ids = inputs["input_ids"].to(device)
+        prompt_len = input_ids.shape[1]
+
+        # Fresh KV cache for this generation
+        model.init_kv_cache()
+
+        generated_ids: list[int] = []
+        prev_text = ""
+
+        with torch.no_grad():
+            # --- Prefill: process all prompt tokens at once ---
+            logits = model(input_ids, start_pos=0)
+            next_logits = logits[:, -1, :].float()
+
+            # Sample first new token
+            next_token = self.sampler(next_logits)           # [1, 1]
+            next_token_id = next_token.item()
+
+            if next_token_id == tokenizer.eos_token_id:
+                model.clear_kv_cache()
+                return
+
+            generated_ids.append(next_token_id)
+            current_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+            new_text = current_text[len(prev_text):]
+            prev_text = current_text
+            if new_text:
+                yield new_text
+
+            # --- Autoregressive decode loop ---
+            current_pos = prompt_len
+            for _step in range(max_tokens - 1):
+                token_input = torch.tensor([[next_token_id]], device=device)
+                logits = model(token_input, start_pos=current_pos)
+                next_logits = logits[:, -1, :].float()
+
+                # Build previous-token tensor for repetition penalty
+                all_ids = input_ids[0].tolist() + generated_ids
+                prev_tokens = torch.tensor([all_ids], device=device)
+
+                next_token = self.sampler(next_logits, previous_tokens=prev_tokens)
+                next_token_id = next_token.item()
+
+                if next_token_id == tokenizer.eos_token_id:
+                    break
+
+                generated_ids.append(next_token_id)
+                current_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+                new_text = current_text[len(prev_text):]
+                prev_text = current_text
+                if new_text:
+                    yield new_text
+
+                current_pos += 1
+
+        model.clear_kv_cache()
+
+    # ------------------------------------------------------------------
+    # Utility methods (quantization, sparsity, benchmarking)
+    # ------------------------------------------------------------------
+
+    def quantize_tensor(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Quantize a single tensor using the configured quantizer."""
+        if self.quantizer is None:
+            return tensor
+        return self.quantizer.quantize(tensor)
+
+    def apply_sparsity(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Apply sparsity to activations."""
+        if self.sparsity_engine is None:
+            return tensor
+        return self.sparsity_engine(tensor)
 
     def get_model_info(self) -> dict:
         """Get information about the loaded model."""
-        if not self._model_loaded:
+        if not self._model_loaded or self._model is None:
             return {"loaded": False}
 
-        total_params = sum(
-            t.numel() if isinstance(t, torch.Tensor) else 0
-            for t in self._model_weights.values()
-        )
-
-        total_bytes = sum(
-            t.element_size() * t.numel() if isinstance(t, torch.Tensor) else 0
-            for t in self._model_weights.values()
-        )
+        total_params = sum(p.numel() for p in self._model.parameters())
+        total_bytes = sum(p.numel() * p.element_size() for p in self._model.parameters())
 
         return {
             "loaded": True,
-            "num_layers": self._layer_count,
+            "num_layers": self._model_config.get("num_hidden_layers", 0),
             "total_parameters": total_params,
             "total_parameters_billions": total_params / 1e9,
             "memory_usage_gb": total_bytes / (1024**3),
-            "num_tensors": len(self._model_weights),
             "quantization": self.config.quantization.mode.value,
+            "device": str(self.device),
         }
 
     def benchmark(self, num_tokens: int = 100) -> dict:
-        """
-        Run a simple benchmark.
-
-        Args:
-            num_tokens: Number of tokens to generate for benchmarking.
-
-        Returns:
-            Dictionary with benchmark results.
-        """
+        """Run a simple benchmark on quantization and sparsity speed."""
         logger.info(f"Running benchmark with {num_tokens} tokens...")
 
-        # Benchmark quantization speed
         test_tensor = torch.randn(4096, 4096)
 
-        # Quantization benchmark
         start = time.time()
         if self.quantizer:
             quantized = self.quantizer.quantize(test_tensor)
             dequantized = self.quantizer.dequantize(quantized)
         quant_time = time.time() - start
 
-        # Sparsity benchmark
         start = time.time()
         if self.sparsity_engine:
             sparse = self.sparsity_engine(test_tensor)
         sparse_time = time.time() - start
 
-        # Memory info
         import psutil
 
         mem = psutil.virtual_memory()
@@ -435,7 +436,6 @@ class GravitonEngine:
         }
 
     def __repr__(self) -> str:
-        """String representation."""
         return (
             f"GravitonEngine("
             f"quant={self.config.quantization.mode.value}, "

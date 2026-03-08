@@ -18,6 +18,23 @@ from graviton.sparsity.topk import TopKActivation
 
 logger = logging.getLogger(__name__)
 
+try:
+    _RMSNorm = nn.RMSNorm
+except AttributeError:
+
+    class _RMSNorm(nn.Module):
+        def __init__(self, normalized_shape, eps=1e-6):
+            super().__init__()
+            if isinstance(normalized_shape, int):
+                normalized_shape = (normalized_shape,)
+            self.weight = nn.Parameter(torch.ones(normalized_shape))
+            self.eps = eps
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            variance = x.float().pow(2).mean(-1, keepdim=True)
+            x = x * torch.rsqrt(variance + self.eps)
+            return (self.weight * x).to(x.dtype)
+
 
 class GravitonFeedForward(nn.Module):
     """
@@ -91,15 +108,15 @@ class GravitonTransformerBlock(nn.Module):
             sparsity_ratio=sparsity_ratio,
         )
         
-        # Layer Norms (using RMSNorm standard in modern LLMs)
-        self.input_layernorm = nn.RMSNorm(self.hidden_size, eps=config.get("rms_norm_eps", 1e-6))
-        self.post_attention_layernorm = nn.RMSNorm(self.hidden_size, eps=config.get("rms_norm_eps", 1e-6))
+        self.input_layernorm = _RMSNorm(self.hidden_size, eps=config.get("rms_norm_eps", 1e-6))
+        self.post_attention_layernorm = _RMSNorm(self.hidden_size, eps=config.get("rms_norm_eps", 1e-6))
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         kv_cache=None,
+        position_embeddings=None,
     ) -> torch.Tensor:
         """
         Forward pass through the transformer block.
@@ -107,20 +124,21 @@ class GravitonTransformerBlock(nn.Module):
         # 1. Attention Block
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        
+
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             kv_cache=kv_cache,
             layer_idx=self.layer_idx,
+            position_embeddings=position_embeddings,
         )
         hidden_states = residual + hidden_states
-        
+
         # 2. MLP Block
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        
+
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
-        
+
         return hidden_states

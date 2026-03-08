@@ -112,16 +112,26 @@ print(response)
 graviton info
 
 # Run inference with a small open model
-graviton run TinyLlama/TinyLlama-1.1B-Chat-v1.0 --prompt 'Hello, world!'
-
-# Quantize a model
-graviton quantize TinyLlama/TinyLlama-1.1B-Chat-v1.0 --bits 4 --output ./models/tinyllama-4bit
-
-# Run inference on the quantized model
-graviton run ./models/tinyllama-4bit --prompt 'Hello, world!'
+graviton run TinyLlama/TinyLlama-1.1B-Chat-v1.0 --prompt 'Explain quantum computing in one sentence:'
 
 # Benchmark performance
 graviton benchmark
+```
+
+**Example output** (Apple M1 Max, 64GB):
+
+```
+Loading model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+Model ready: 1.10B params, 2.05 GB on mps
+
+Prompt: Explain quantum computing in one sentence:
+--------------------------------------------------
+Generation: Quantum computing uses quantum mechanics to perform
+calculations that would be impossible with classical computers,
+such as factoring large numbers or solving complex problems in
+seconds instead of hours.
+--------------------------------------------------
+Generated 35 tokens in 2.57s (31.1 tok/s)
 ```
 
 ## 🔬 How It Works
@@ -183,6 +193,20 @@ decoder = SpeculativeDecoder(
 
 ## 📊 Benchmarks
 
+### Inference Speed
+
+*Measured on Apple M1 Max (64GB) with TinyLlama-1.1B:*
+
+| Metric | Value |
+|---|---|
+| **Model Load Time** | ~6s (from HuggingFace cache) |
+| **Prefill Speed** | ~500 tok/s |
+| **Decode Speed** | ~16–31 tok/s |
+| **KV Cache** | INT8 compressed (sliding window) |
+| **Device** | MPS (Apple Metal) with Flash Attention |
+
+### Memory Compression
+
 *Measured memory compression on real HuggingFace models using Graviton Engine:*
 
 | Model | Original FP16 Size | Graviton INT4 | Graviton 1.58-Bit (Ternary) | Reduction |
@@ -204,20 +228,29 @@ To find the exact limits of Apple Silicon Unified Memory, we ran a synthetic ten
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│                 GravitonEngine               │
-├──────────┬──────────┬──────────┬────────────┤
-│ Quantize │ Sparsity │  Memory  │  Decoding  │
-│  Engine  │  Engine  │ Manager  │   Engine   │
-├──────────┼──────────┼──────────┼────────────┤
-│ • INT8   │ • Top-K  │ • mmap   │ • Specul.  │
-│ • INT4   │ • Prune  │ • Stream │ • Sampling │
-│ • 2-bit  │ • MoE    │ • Cache  │ • Beam     │
-│ • 1.58b  │          │ • LRU    │            │
-├──────────┴──────────┴──────────┴────────────┤
-│             Hardware Detector                │
-│     (Apple Silicon / CUDA / CPU Auto)        │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                    GravitonEngine                     │
+├──────────────────────────────────────────────────────┤
+│  Tokenizer ─► GravitonCausalLM ─► Sampler ─► Output  │
+│               │                                      │
+│               ├── Embedding                          │
+│               ├── TransformerBlock × N               │
+│               │   ├── RMSNorm + RoPE Attention (GQA) │
+│               │   └── SwiGLU FFN (Top-K Sparse)      │
+│               ├── Final RMSNorm                      │
+│               └── LM Head                            │
+├──────────┬──────────┬──────────┬─────────────────────┤
+│ Quantize │ Sparsity │  Memory  │      Decoding       │
+│  Engine  │  Engine  │ Manager  │      Engine         │
+├──────────┼──────────┼──────────┼─────────────────────┤
+│ • INT8   │ • Top-K  │ • mmap   │ • Speculative       │
+│ • INT4   │ • Prune  │ • Stream │ • Top-K / Top-P     │
+│ • 2-bit  │ • MoE    │ • KV$    │ • Temperature       │
+│ • 1.58b  │          │ • LRU    │ • Rep. Penalty      │
+├──────────┴──────────┴──────────┴─────────────────────┤
+│               Hardware Detector                      │
+│        (Apple Silicon / CUDA / CPU Auto)             │
+└──────────────────────────────────────────────────────┘
 ```
 
 ## 🤝 Contributing

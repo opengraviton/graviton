@@ -108,17 +108,18 @@ def cmd_run(args):
     print("-" * 50)
     
     start_time = time.time()
-    
-    # Using the generation generator for streaming output
+
     print("Generation: ", end="", flush=True)
     generated = ""
-    for token in engine.generate(args.prompt, stream=True):
-        print(token, end="", flush=True)
-        generated += token
-    
+    chunk_count = 0
+    for chunk in engine.generate(args.prompt, stream=True):
+        print(chunk, end="", flush=True)
+        generated += chunk
+        chunk_count += 1
+
     elapsed = time.time() - start_time
     print(f"\n{'-' * 50}")
-    print(f"Generated {config.decoding.max_tokens} tokens in {elapsed:.2f}s ({config.decoding.max_tokens / max(elapsed, 0.001):.1f} tok/s)")
+    print(f"Generated {chunk_count} tokens in {elapsed:.2f}s ({chunk_count / max(elapsed, 0.001):.1f} tok/s)")
 
 
 def cmd_quantize(args):

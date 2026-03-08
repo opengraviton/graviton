@@ -6,6 +6,7 @@ Implements optimized attention variations:
 - Grouped Query Attention (GQA)
 - Multi-Query Attention (MQA)
 - Support for KV-cache compression
+- Rotary Position Embeddings (RoPE)
 """
 
 from __future__ import annotations
@@ -21,6 +22,52 @@ import torch.nn.functional as F
 from graviton.memory.cache import KVCacheCompressor
 
 logger = logging.getLogger(__name__)
+
+
+class RotaryPositionEmbedding(nn.Module):
+    """
+    Rotary Position Embedding (RoPE).
+
+    Encodes absolute position information into query and key vectors
+    using rotation matrices, enabling relative position awareness.
+    """
+
+    def __init__(self, dim: int, max_position_embeddings: int = 2048, base: float = 10000.0):
+        super().__init__()
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.max_position_embeddings = max_position_embeddings
+
+    def forward(self, position_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute cos/sin embeddings for given positions.
+
+        Args:
+            position_ids: [batch, seq_len] position indices.
+
+        Returns:
+            (cos, sin) each of shape [1, 1, seq_len, dim].
+        """
+        freqs = torch.outer(position_ids[0].float(), self.inv_freq.to(position_ids.device))
+        emb = torch.cat([freqs, freqs], dim=-1)
+        return emb.cos().unsqueeze(0).unsqueeze(0), emb.sin().unsqueeze(0).unsqueeze(0)
+
+
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotate half the hidden dims of the input for RoPE."""
+    x1, x2 = x.chunk(2, dim=-1)
+    return torch.cat([-x2, x1], dim=-1)
+
+
+def apply_rotary_pos_emb(
+    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Apply rotary position embeddings to query and key tensors."""
+    cos = cos.to(q.dtype)
+    sin = sin.to(q.dtype)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
 
 
 class EfficientAttention(nn.Module):
@@ -75,41 +122,45 @@ class EfficientAttention(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         kv_cache: Optional[KVCacheCompressor] = None,
         layer_idx: Optional[int] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         """
-        Forward pass with optional KV caching.
-        
+        Forward pass with optional KV caching and RoPE.
+
         Args:
             hidden_states: Input features [batch, seq_len, hidden_size]
             attention_mask: Mask for padding/causality
             kv_cache: Optional compressed KV cache
             layer_idx: Required if using kv_cache
-            
+            position_embeddings: Optional (cos, sin) from RotaryPositionEmbedding
+
         Returns:
             Attention output tensor.
         """
         batch_size, seq_length, _ = hidden_states.shape
-        
+
         # Project Q, K, V
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
-        
-        # Reshape for multi-head attention: [batch, seq_len, num_heads, head_dim] -> [batch, num_heads, seq_len, head_dim]
+
+        # Reshape: [batch, seq, heads, dim] -> [batch, heads, seq, dim]
         query_states = query_states.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(batch_size, seq_length, self.num_kv_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(batch_size, seq_length, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        
+
+        # Apply Rotary Position Embeddings
+        if position_embeddings is not None:
+            cos, sin = position_embeddings
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+
         # Manage KV Cache
         if kv_cache is not None and layer_idx is not None:
-            # Add new KV to cache
             kv_cache.update(layer_idx, key_states, value_states)
-            
-            # Retrieve full cached sequence
             cached_k, cached_v = kv_cache.get(layer_idx)
             if cached_k is not None and cached_v is not None:
-                key_states = cached_k
-                value_states = cached_v
+                key_states = cached_k.to(query_states.dtype)
+                value_states = cached_v.to(query_states.dtype)
 
         # Repeat KV heads for Grouped Query Attention
         if self.num_key_value_groups > 1:
