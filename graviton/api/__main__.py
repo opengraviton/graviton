@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+# MPS memory limit bypass (for large models on Apple Silicon)
+import os
+if "PYTORCH_MPS_HIGH_WATERMARK_RATIO" not in os.environ:
+    os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+
 import argparse
 import signal
 import sys
