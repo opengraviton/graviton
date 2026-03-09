@@ -89,14 +89,33 @@ class QuantizedLinear(nn.Module):
     # ------------------------------------------------------------------
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self._is_ternary:
+            # BitNet-style path: use ternary_matmul (add/subtract only, no float multiply)
+            # Keeps weights packed — no dequantization, minimal memory, max efficiency
+            return self._forward_ternary(x)
         if self._cached_weight is None:
             self._materialize_weight(x.dtype, x.device)
-
         out = F.linear(x, self._cached_weight, self._bias)
         return out
 
+    def _forward_ternary(self, x: torch.Tensor) -> torch.Tensor:
+        """Efficient ternary matmul: Y = X @ W_ternary * scale (add/subtract only)."""
+        qtensor = QuantizedTensor(
+            data=self._packed_data,
+            scale=self._scale,
+            zero_point=self._zero_point,
+            bits=self._bits,
+            shape=(self.out_features, self.in_features),
+            group_size=self._group_size,
+            dtype=self._orig_dtype,
+        )
+        out = self._quantizer.ternary_matmul(x, qtensor)
+        if self._bias is not None:
+            out = out + self._bias
+        return out
+
     def _materialize_weight(self, dtype: torch.dtype, device: torch.device):
-        """Dequantize packed weights once and cache the result."""
+        """Dequantize packed weights once and cache (INT4/INT8 path only)."""
         qtensor = QuantizedTensor(
             data=self._packed_data,
             scale=self._scale,

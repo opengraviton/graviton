@@ -374,6 +374,30 @@ class GravitonEngine:
         total = per_layer * num_layers + vocab * hidden * 2
         return (total * 2) / (1024 ** 3)
 
+    def _is_bitnet_model(self, model_dir: Path) -> bool:
+        """Detect BitNet / Graviton-Native checkpoint."""
+        config_path = model_dir / "config.json"
+        if not config_path.exists():
+            return False
+        import json
+        with open(config_path) as f:
+            cfg = json.load(f)
+        return (
+            cfg.get("model_type") == "bitnet"
+            or cfg.get("use_ternary_weights") is True
+            or (cfg.get("architectures") or [""])[0] == "BitNetForCausalLM"
+        )
+
+    def _is_moe_model(self, model_dir: Path) -> bool:
+        """Detect MoE / Graviton-Native checkpoint."""
+        config_path = model_dir / "config.json"
+        if not config_path.exists():
+            return False
+        import json
+        with open(config_path) as f:
+            cfg = json.load(f)
+        return cfg.get("num_experts", 0) > 0
+
     def _build_inference_model(self, model_dir: Path):
         """
         Build the full inference model from a local directory.
@@ -381,9 +405,30 @@ class GravitonEngine:
         Automatically chooses between direct loading (small models that
         fit in RAM as FP16) and streaming layer-by-layer loading with
         on-the-fly quantization (large models).
+        BitNet / Graviton-Native models use native ternary inference.
         """
         from graviton.models.graviton_model import GravitonCausalLM
+        from graviton.models.bitnet_causal_lm import BitNetCausalLM
         from graviton.core.config import QuantMode
+
+        if self._is_bitnet_model(model_dir):
+            self._report_progress("Loading BitNet model (native ternary)...")
+            self._model = BitNetCausalLM.from_pretrained_dir(model_dir, dtype=self.dtype)
+            self._model.to(self.device)
+            self._model.eval()
+            self._model_config = self._model.model_config
+            self._load_tokenizer(model_dir)
+            return
+
+        if self._is_moe_model(model_dir):
+            from graviton.models.moe_causal_lm import MoECausalLM
+            self._report_progress("Loading MoE model (Mixture of Experts)...")
+            self._model = MoECausalLM.from_pretrained_dir(model_dir, dtype=self.dtype)
+            self._model.to(self.device)
+            self._model.eval()
+            self._model_config = self._model.model_config
+            self._load_tokenizer(model_dir)
+            return
 
         fp16_gb = self._estimate_fp16_gb(model_dir)
         use_streaming = fp16_gb > self.hardware.available_memory_gb * 0.7
@@ -445,11 +490,14 @@ class GravitonEngine:
                 str(model_dir), trust_remote_code=False
             )
             logger.info(f"Tokenizer loaded: vocab_size={len(self._tokenizer)}")
-        except ImportError:
-            raise ImportError(
-                "transformers is required for tokenization. "
-                "Install with: pip install graviton-ai[huggingface]"
-            )
+        except Exception as e:
+            if self._is_bitnet_model(model_dir) or self._is_moe_model(model_dir):
+                logger.warning(f"Tokenizer load failed ({e}), using TinyLlama fallback")
+                self._tokenizer = AutoTokenizer.from_pretrained(
+                    "TinyLlama/TinyLlama-1.1B-Chat-v1.0", trust_remote_code=False
+                )
+            else:
+                raise
 
     def format_chat_prompt(
         self,
