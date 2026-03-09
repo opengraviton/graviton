@@ -353,6 +353,28 @@ This project is licensed under the Apache License 2.0 — see the [LICENSE](LICE
 
 If you find Graviton useful, please consider giving it a star!
 
+## Graviton-Native: Efficient Architectures
+
+Graviton supports **native efficient architectures** trained from scratch — not just post-training quantization:
+
+| Architecture | Description | Memory |
+|--------------|-------------|--------|
+| **BitNet b1.58** | Ternary weights {-1, 0, +1}, add/subtract-only matmul | 350M → ~66 MB |
+| **MoE** | Mixture of Experts, top-k routing, sparse activation | 500B total, ~10B active |
+
+Train with [Graviton-Native](https://github.com/opengraviton/graviton-native) and run in Graviton:
+
+```bash
+# Train BitNet
+cd graviton-native && python scripts/train_bitnet_full.py --model_size 350m --steps 500
+
+# Run in Graviton UI
+graviton-ui
+# Model: graviton-native/checkpoints/bitnet-350m
+```
+
+See [Graviton-Native Paper](https://opengraviton.github.io/paper.html) for the full technical report.
+
 ## Acknowledgments
 
 - [BitNet b1.58](https://arxiv.org/abs/2402.17764) — Inspiration for ternary quantization
