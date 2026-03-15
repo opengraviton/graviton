@@ -396,7 +396,17 @@ class GravitonEngine:
         import json
         with open(config_path) as f:
             cfg = json.load(f)
-        return cfg.get("num_experts", 0) > 0
+        return cfg.get("num_experts", 0) > 0 and cfg.get("model_type") != "omega"
+
+    def _is_omega_model(self, model_dir: Path) -> bool:
+        """Detect Omega / Graviton-Native checkpoint (k=1 MoE + BitNet)."""
+        config_path = model_dir / "config.json"
+        if not config_path.exists():
+            return False
+        import json
+        with open(config_path) as f:
+            cfg = json.load(f)
+        return cfg.get("model_type") == "omega"
 
     def _build_inference_model(self, model_dir: Path):
         """
@@ -414,6 +424,16 @@ class GravitonEngine:
         if self._is_bitnet_model(model_dir):
             self._report_progress("Loading BitNet model (native ternary)...")
             self._model = BitNetCausalLM.from_pretrained_dir(model_dir, dtype=self.dtype)
+            self._model.to(self.device)
+            self._model.eval()
+            self._model_config = self._model.model_config
+            self._load_tokenizer(model_dir)
+            return
+
+        if self._is_omega_model(model_dir):
+            from graviton.models.omega_causal_lm import OmegaCausalLM
+            self._report_progress("Loading Omega model (ultra-sparse MoE + BitNet)...")
+            self._model = OmegaCausalLM.from_pretrained_dir(model_dir, dtype=self.dtype)
             self._model.to(self.device)
             self._model.eval()
             self._model_config = self._model.model_config
@@ -491,7 +511,7 @@ class GravitonEngine:
             )
             logger.info(f"Tokenizer loaded: vocab_size={len(self._tokenizer)}")
         except Exception as e:
-            if self._is_bitnet_model(model_dir) or self._is_moe_model(model_dir):
+            if self._is_bitnet_model(model_dir) or self._is_moe_model(model_dir) or self._is_omega_model(model_dir):
                 logger.warning(f"Tokenizer load failed ({e}), using TinyLlama fallback")
                 self._tokenizer = AutoTokenizer.from_pretrained(
                     "TinyLlama/TinyLlama-1.1B-Chat-v1.0", trust_remote_code=False
